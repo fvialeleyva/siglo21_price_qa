@@ -5,7 +5,43 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* La herramienta usa siempre tema claro (los colores de las cards asumen fondo claro). */
+/* ============================================
+   Conversia — paleta oficial de marca
+   (se exponen como tokens de Tailwind: bg-primary-300, text-secondary-600, …)
+   ============================================ */
+@theme {
+  /* Primary (verde Conversia — el color del logo es primary-300 #86F874) */
+  --color-primary-25: #f6fff5;
+  --color-primary-50: #eafee7;
+  --color-primary-100: #d9fdd3;
+  --color-primary-200: #affaa3;
+  --color-primary-300: #86f874;
+  --color-primary-400: #5af542;
+  --color-primary-500: #29e40b;
+  --color-primary-600: #23c309;
+  --color-primary-700: #1a9207;
+  --color-primary-800: #126105;
+  --color-primary-900: #0d4304;
+  --color-primary-950: #093103;
+
+  /* Secondary (teal) */
+  --color-secondary-25: hsl(171, 87%, 97%);
+  --color-secondary-50: hsl(169, 87%, 94%);
+  --color-secondary-100: hsl(170, 87%, 88%);
+  --color-secondary-200: hsl(171, 86%, 75%);
+  --color-secondary-300: hsl(171, 86%, 59%);
+  --color-secondary-400: hsl(170, 86%, 47%);
+  --color-secondary-500: hsl(171, 86%, 38%);
+  --color-secondary-600: hsl(171, 85%, 32%);
+  --color-secondary-700: hsl(170, 85%, 23%);
+
+  /* Neutrales con matiz frío/verde de la marca */
+  --color-brand-ink: hsl(180, 3%, 14.5%); /* texto principal — nunca negro puro */
+  --color-brand-mist: hsl(180, 5%, 96%);
+}
+
+/* La herramienta usa siempre tema claro y luminoso (estética Conversia). */
 body {
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  color: var(--color-brand-ink);
 }

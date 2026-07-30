@@ -336,7 +336,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
         code: "PRESENCIAL_MODALITY",
         httpEquivalent: 422,
         title: "Modalidad presencial — comportamiento esperado",
-        explanation: `La modalidad ${modalityId} (${MODALITY_NAMES[modalityId]}) es presencial y por diseño NO tiene precio online: el bot debe derivar al estudiante a un asesor de Admisión. Esto no es una falla — es el comportamiento configurado. No hay nada que reportar a Siglo 21.`,
+        explanation: `La modalidad ${modalityId} (${MODALITY_NAMES[modalityId]}) es presencial y por diseño NO tiene precio online: el agente IA debe derivar al estudiante a un asesor de Admisión. Esto no es una falla — es el comportamiento configurado. No hay nada que reportar a Siglo 21.`,
         responsible: "comportamiento_esperado",
       },
       input
@@ -455,7 +455,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
           ? `Siglo 21 rechazó el token recién emitido (HTTP ${turnosOutcome.httpStatus}) al consultar los turnos. Es una inconsistencia entre su servidor de autenticación y su API de precios. Reportar a Siglo 21 adjuntando el detalle técnico.`
           : schedules.length === 0 && turnosOutcome.ok
             ? `Siglo 21 no tiene turnos de cursado cargados para la carrera ${programId} en modalidad ${modalityId} con el CAU ${cauId}. Puede ser que la combinación carrera/modalidad/CAU no exista o no esté configurada del lado de Siglo 21. Verificar primero que los datos sean correctos; si lo son, reportar a Siglo 21.`
-            : `La consulta de turnos a Siglo 21 falló: ${reason}. Este es el primer paso de la consulta de precio, así que el bot no pudo dar precio. Reportar a Siglo 21 con el detalle técnico.`,
+            : `La consulta de turnos a Siglo 21 falló: ${reason}. Este es el primer paso de la consulta de precio, así que el agente IA no pudo dar precio. Reportar a Siglo 21 con el detalle técnico.`,
         responsible: isAuthProblem || !turnosOutcome.ok ? "siglo21" : "config",
       },
       input
@@ -615,7 +615,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
         code: "PRICE_FETCH_ERROR",
         httpEquivalent: 500,
         title: "Siglo 21 no devolvió precio para ningún período",
-        explanation: `Los turnos y períodos existen, pero la API de precios de Siglo 21 falló para TODOS los períodos (${periodPrices.length}). El bot no pudo dar precio. Puede ser un error temporal de Siglo 21 o que los períodos no estén activos en su configuración de precios. Reportar a Siglo 21 adjuntando los errores de cada período (detalle técnico abajo).`,
+        explanation: `Los turnos y períodos existen, pero la API de precios de Siglo 21 falló para TODOS los períodos (${periodPrices.length}). El agente IA no pudo dar precio. Puede ser un error temporal de Siglo 21 o que los períodos no estén activos en su configuración de precios. Reportar a Siglo 21 adjuntando los errores de cada período (detalle técnico abajo).`,
         responsible: "siglo21",
       },
       input,
@@ -628,14 +628,14 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
       id: "precios",
       title: "3/3 — Precios por período",
       status: "warning",
-      detail: `${okCount} período(s) con precio OK, pero ${failCount} período(s) fallaron y el middleware los OMITE EN SILENCIO (no aparecen en la respuesta del bot). Ver detalle por período.`,
+      detail: `${okCount} período(s) con precio OK, pero ${failCount} período(s) fallaron y el middleware los OMITE EN SILENCIO (no aparecen en la respuesta del agente IA). Ver detalle por período.`,
     });
     return finish(
       {
         code: "OK_PARTIAL",
         httpEquivalent: 200,
         title: "Precio obtenido, pero con períodos omitidos",
-        explanation: `El bot SÍ recibió precio (${okCount} de ${periodPrices.length} períodos), pero ${failCount} período(s) fallaron en Siglo 21 y se omitieron en silencio. Si el estudiante preguntaba por uno de los períodos omitidos, el bot no tenía ese dato. Revisar el detalle por período para ver cuáles fallaron y por qué.`,
+        explanation: `El agente IA SÍ recibió precio (${okCount} de ${periodPrices.length} períodos), pero ${failCount} período(s) fallaron en Siglo 21 y se omitieron en silencio. Si el estudiante preguntaba por uno de los períodos omitidos, el agente IA no tenía ese dato. Revisar el detalle por período para ver cuáles fallaron y por qué.`,
         responsible: "siglo21",
       },
       input,
@@ -655,7 +655,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
       code: "OK",
       httpEquivalent: 200,
       title: "Todo funcionó correctamente",
-      explanation: `La consulta completa funcionó: hay turno, ${periodPrices.length} período(s) y todos con precio. Si el bot no dio precio en la conversación, el problema NO fue esta consulta a Siglo 21 en este momento — pudo ser un error temporal en el momento de la conversación, o un problema en otro punto del flujo del bot.`,
+      explanation: `La consulta completa funcionó: hay turno, ${periodPrices.length} período(s) y todos con precio. Si el agente IA no dio precio en la conversación, el problema NO fue esta consulta a Siglo 21 en este momento — pudo ser un error temporal en el momento de la conversación, o un problema en otro punto del flujo del agente IA.`,
       responsible: "nadie",
     },
     input,
