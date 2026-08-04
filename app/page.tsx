@@ -230,7 +230,7 @@ function buildReport(r: DiagnosisResult): string {
     lines.push("Precios por período:");
     for (const p of r.periodPrices) {
       if (p.ok) {
-        lines.push(`  [OK] ${p.periodName}-${p.subPeriod}: total ${p.total}`);
+        lines.push(`  [OK] ${p.periodName}-${p.subPeriod}: total del período ${p.total}`);
       } else {
         lines.push(`  [FALLÓ] ${p.periodName}-${p.subPeriod}: ${p.errorDetail}`);
         lines.push(`    URL: GET ${p.url}`);
@@ -388,7 +388,7 @@ function PeriodContextBlock({
       {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
         <div className="col-span-2 flex justify-between border-b border-dashed border-gray-200 pb-1.5">
-          <dt className="text-gray-500">Total del período</dt>
+          <dt className="text-gray-500">Total del período (no de la carrera)</dt>
           <dd className="font-semibold">{money(total)}</dd>
         </div>
         {typeof period.totalListPrice === "number" && (
@@ -418,6 +418,7 @@ function PeriodContextBlock({
 
 const AGENT_RULES = [
   "La oración del precio es inmutable: no la modifica ni la parafrasea.",
+  "Los montos son únicamente del período de cursado activo (matrícula + aranceles), no de la carrera completa. Si preguntan cuánto cuesta toda la carrera, nunca presenta estos montos como tal: explica que el arancel es por período y ofrece derivar a un asesor de Admisión.",
   "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca ofrece más por iniciativa propia.",
   "Nunca inventa ni estima precios.",
   "Si preguntan por medios de pago, bancos o promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
@@ -594,7 +595,7 @@ function ResultCard({ result, index }: { result: DiagnosisResult; index: number 
               <tr className="text-left text-xs text-gray-500 border-b border-gray-200">
                 <th className="px-3 py-2"></th>
                 <th className="px-3 py-2">Período</th>
-                <th className="px-3 py-2">Total</th>
+                <th className="px-3 py-2">Total del período</th>
                 <th className="px-3 py-2">Estado</th>
                 <th className="px-3 py-2"></th>
               </tr>
