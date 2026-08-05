@@ -416,7 +416,18 @@ function PeriodContextBlock({
   );
 }
 
+function todayInArgentina() {
+  return new Date().toLocaleDateString("es-AR", {
+    weekday: "long",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "America/Argentina/Buenos_Aires",
+  });
+}
+
 const AGENT_RULES = [
+  "Recibe la fecha de hoy (horario de Argentina) en el contexto y la usa como única referencia temporal para plazos, inicios de clases y períodos.",
   "La oración del precio es inmutable: no la modifica ni la parafrasea.",
   "Los montos son únicamente del período de cursado activo (matrícula + aranceles), no de la carrera completa. Si preguntan cuánto cuesta toda la carrera, nunca presenta estos montos como tal: explica que el arancel es por período y ofrece derivar a un asesor de Admisión.",
   "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca ofrece más por iniciativa propia.",
@@ -477,6 +488,11 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
         <div className="px-5 py-4 space-y-5">
           {okPeriods.length > 0 ? (
             <>
+              <p className="text-xs text-gray-500">
+                📆 Fecha de HOY para el agente:{" "}
+                <span className="font-semibold text-brand-ink">{todayInArgentina()}</span> — la usa como única
+                referencia temporal.
+              </p>
               <PeriodContextBlock
                 title="📋 Período principal"
                 subtitle="El agente arma el bloque de precio con este período."
