@@ -175,7 +175,20 @@ function PeriodRow({ p }: { p: PeriodPriceResult }) {
     <>
       <tr className={p.ok ? "" : "bg-red-50"}>
         <td className="px-3 py-2 whitespace-nowrap">{p.ok ? "✅" : "❌"}</td>
-        <td className="px-3 py-2 font-mono whitespace-nowrap">{p.periodName}-{p.subPeriod}</td>
+        <td className="px-3 py-2 whitespace-nowrap">
+          <span className="font-mono">{p.periodName}-{p.subPeriod}</span>
+          {p.periodLabel && <span className="ml-1.5 text-xs text-gray-500">{p.periodLabel}</span>}
+          {p.role === "primary" && (
+            <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wide bg-primary-100 text-primary-800 border border-primary-200 rounded-full px-2 py-0.5 align-middle">
+              principal
+            </span>
+          )}
+          {p.role === "alternative" && (
+            <span className="ml-1.5 text-[10px] uppercase tracking-wide bg-gray-100 text-gray-600 border border-gray-200 rounded-full px-2 py-0.5 align-middle">
+              alternativo
+            </span>
+          )}
+        </td>
         <td className="px-3 py-2 whitespace-nowrap">{p.ok ? money(p.total) : "—"}</td>
         <td className="px-3 py-2">
           {p.ok ? (
@@ -229,10 +242,12 @@ function buildReport(r: DiagnosisResult): string {
     lines.push("");
     lines.push("Precios por período:");
     for (const p of r.periodPrices) {
+      const rol = p.role === "primary" ? " · PRINCIPAL (el que ve el estudiante)" : p.role === "alternative" ? " · alternativo oculto" : "";
+      const cursado = p.coverageLabel ? ` · cursado: ${p.coverageLabel}` : "";
       if (p.ok) {
-        lines.push(`  [OK] ${p.periodName}-${p.subPeriod}: total del período ${p.total}`);
+        lines.push(`  [OK] ${p.periodName}-${p.subPeriod}${p.periodLabel ? ` (${p.periodLabel})` : ""}: total del período ${p.total}${rol}${cursado}`);
       } else {
-        lines.push(`  [FALLÓ] ${p.periodName}-${p.subPeriod}: ${p.errorDetail}`);
+        lines.push(`  [FALLÓ] ${p.periodName}-${p.subPeriod}${rol}: ${p.errorDetail}`);
         lines.push(`    URL: GET ${p.url}`);
         if (p.rawResponse) lines.push(`    Respuesta: ${p.rawResponse.slice(0, 500)}`);
       }
@@ -244,10 +259,33 @@ function buildReport(r: DiagnosisResult): string {
 // ── Ejemplo del mensaje que daría el agente IA al estudiante ───────────────────
 
 type BotPreview =
-  | { tone: "price"; cuota6: number; cuota3: number; alternatives: { label: string; cuota6: number }[] }
+  | {
+      tone: "price";
+      cuota6: number;
+      cuota3: number;
+      periodLabel?: string;
+      coverageLabel?: string;
+      alternatives: { label: string; cuota6: number; coverageLabel?: string }[];
+    }
   | { tone: "advisor" }
   | { tone: "derive" }
   | { tone: "none"; reason: string };
+
+/**
+ * El período principal es el que el middleware marca como activo con su tabla
+ * hardcodeada (rol "primary") — no necesariamente el primero que devuelve la
+ * API de Siglo 21. Si no hay roles (modalidad no ED/EHD), se usa el primero.
+ */
+function splitPrimaryAndAlternatives(r: DiagnosisResult) {
+  const okPeriods = r.periodPrices.filter((p) => p.ok && typeof p.total === "number");
+  if (okPeriods.length === 0) return { primary: undefined, alternatives: [] as PeriodPriceResult[] };
+  const primary = okPeriods.find((p) => p.role === "primary") ?? okPeriods[0];
+  return { primary, alternatives: okPeriods.filter((p) => p !== primary) };
+}
+
+function periodDisplayLabel(p: PeriodPriceResult): string {
+  return p.periodLabel ?? `${p.periodName}-${p.subPeriod}`;
+}
 
 function botPreview(r: DiagnosisResult): BotPreview {
   const code = r.verdict.code;
@@ -259,18 +297,20 @@ function botPreview(r: DiagnosisResult): BotPreview {
         "El agente IA no llega a responder nada: la consulta ni siquiera se arma porque faltan datos obligatorios. Es un problema de configuración, no algo que el estudiante llegue a ver.",
     };
 
-  const okPeriods = r.periodPrices.filter((p) => p.ok && typeof p.total === "number");
-  if (okPeriods.length > 0) {
-    const [primary, ...rest] = okPeriods;
+  const { primary, alternatives } = splitPrimaryAndAlternatives(r);
+  if (primary) {
     const total = primary.total as number;
     const round2 = (n: number) => Math.round(n * 100) / 100;
     return {
       tone: "price",
       cuota6: round2(total / 6),
       cuota3: round2(total / 3),
-      alternatives: rest.map((p) => ({
-        label: `${p.periodName}-${p.subPeriod}`,
+      periodLabel: periodDisplayLabel(primary),
+      coverageLabel: primary.coverageLabel,
+      alternatives: alternatives.map((p) => ({
+        label: periodDisplayLabel(p),
         cuota6: round2((p.total as number) / 6),
+        coverageLabel: p.coverageLabel,
       })),
     };
   }
@@ -294,7 +334,8 @@ function BotMessage({ result }: { result: DiagnosisResult }) {
           {preview.tone === "price" && (
             <>
               <p className="text-sm">
-                Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio.
+                Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio
+                {preview.periodLabel ? ` en ${preview.periodLabel}` : ""}.
               </p>
               <div className="my-2 rounded-xl bg-primary-50 border border-primary-100 px-3 py-2">
                 <p className="font-semibold text-primary-800">
@@ -302,6 +343,11 @@ function BotMessage({ result }: { result: DiagnosisResult }) {
                   {money(preview.cuota6)} (dependiendo del banco de tu tarjeta).
                 </p>
               </div>
+              {preview.coverageLabel && (
+                <p className="text-sm text-gray-700">
+                  Este período cubre el cursado de <span className="font-semibold">{preview.coverageLabel}</span>.
+                </p>
+              )}
               <p className="text-sm text-gray-700">
                 Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y
                 materiales de estudio digitales y acceso a biblioteca.
@@ -315,8 +361,12 @@ function BotMessage({ result }: { result: DiagnosisResult }) {
                 {preview.alternatives.length > 0 && (
                   <p>
                     📅 Además tiene {preview.alternatives.length} período(s) alternativo(s) que ofrece{" "}
-                    <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>:{" "}
-                    {preview.alternatives.map((a) => `${a.label} (6× ${money(a.cuota6)})`).join(" · ")}.
+                    <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>, aclarando
+                    siempre qué meses cubre cada uno:{" "}
+                    {preview.alternatives
+                      .map((a) => `${a.label} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
+                      .join(" · ")}
+                    .
                   </p>
                 )}
               </div>
@@ -387,6 +437,12 @@ function PeriodContextBlock({
       </div>
       {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+        {period.coverageLabel && (
+          <div className="col-span-2 flex justify-between border-b border-dashed border-gray-200 pb-1.5">
+            <dt className="text-gray-500">Meses de cursado</dt>
+            <dd className="font-medium">{period.coverageLabel}</dd>
+          </div>
+        )}
         <div className="col-span-2 flex justify-between border-b border-dashed border-gray-200 pb-1.5">
           <dt className="text-gray-500">Total del período (no de la carrera)</dt>
           <dd className="font-semibold">{money(total)}</dd>
@@ -430,6 +486,7 @@ const AGENT_RULES = [
   "Recibe la fecha de hoy (horario de Argentina) en el contexto y la usa como única referencia temporal para plazos, inicios de clases y períodos.",
   "La oración del precio es inmutable: no la modifica ni la parafrasea.",
   "Los montos son únicamente del período de cursado activo (matrícula + aranceles), no de la carrera completa. Si preguntan cuánto cuesta toda la carrera, nunca presenta estos montos como tal: explica que el arancel es por período y ofrece derivar a un asesor de Admisión.",
+  "Al presentar cualquier período (principal o alternativo), aclara siempre qué meses de cursado abarca (ej: \"este período cubre de octubre a diciembre 2026\").",
   "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca ofrece más por iniciativa propia.",
   "Nunca inventa ni estima precios.",
   "Si preguntan por medios de pago, bancos o promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
@@ -452,7 +509,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
     };
   }, [onClose]);
 
-  const okPeriods = result.periodPrices.filter((p) => p.ok && typeof p.total === "number");
+  const { primary, alternatives } = splitPrimaryAndAlternatives(result);
   const preview = botPreview(result);
 
   return (
@@ -486,7 +543,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
         </div>
 
         <div className="px-5 py-4 space-y-5">
-          {okPeriods.length > 0 ? (
+          {primary ? (
             <>
               <p className="text-xs text-gray-500">
                 📆 Fecha de HOY para el agente:{" "}
@@ -494,13 +551,13 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
                 referencia temporal.
               </p>
               <PeriodContextBlock
-                title="📋 Período principal"
-                subtitle="El agente arma el bloque de precio con este período."
-                period={okPeriods[0]}
+                title={`📋 Período principal${result.primaryPeriodName ? ` — ${result.primaryPeriodName}` : ""}`}
+                subtitle={`El agente arma el bloque de precio con este período${result.primaryPeriodKey ? ` (activo según la tabla del middleware: ${result.primaryPeriodKey})` : ""}.`}
+                period={primary}
                 tone="primary"
               />
 
-              {okPeriods.length > 1 && (
+              {alternatives.length > 0 && (
                 <div>
                   <div className="flex items-center gap-2 mb-1.5">
                     <h4 className="font-semibold text-brand-ink text-sm">📅 Períodos alternativos</h4>
@@ -509,11 +566,17 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
                     </span>
                   </div>
                   <p className="text-xs text-gray-500 mb-2.5">
-                    El agente los ofrece <span className="font-semibold">solo si el estudiante rechaza el principal</span>, de a uno por vez.
+                    El agente los ofrece <span className="font-semibold">solo si el estudiante rechaza el principal</span>, de a uno
+                    por vez, aclarando siempre qué meses de cursado abarca cada uno.
                   </p>
                   <div className="space-y-2.5">
-                    {okPeriods.slice(1).map((p, i) => (
-                      <PeriodContextBlock key={i} title={`Alternativa ${i + 1}`} period={p} tone="alt" />
+                    {alternatives.map((p, i) => (
+                      <PeriodContextBlock
+                        key={i}
+                        title={`Alternativa ${i + 1}${p.periodLabel ? ` — ${p.periodLabel}` : ""}`}
+                        period={p}
+                        tone="alt"
+                      />
                     ))}
                   </div>
                 </div>

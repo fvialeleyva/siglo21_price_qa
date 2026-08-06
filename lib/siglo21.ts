@@ -1,7 +1,10 @@
-// Réplica del flujo get-price-v5 del lambda siglo21-price-proxy, con fines de
+// Réplica del flujo get-price-v4/v5 del lambda siglo21-price-proxy, con fines de
 // diagnóstico: en lugar de retornar solo el precio o un error, registra cada
 // paso (URL, status HTTP, respuesta cruda, duración) para que se pueda ver
 // exactamente dónde y por qué falló la consulta contra la API de Siglo 21.
+// Para ED/EHD también replica la selección del período activo del lambda
+// (tabla hardcodeada + regla de extensión del ticket HF-0113) y marca cada
+// período como principal o alternativo, igual que lo vería el bot.
 
 // Configurable por env var para apuntar a otros entornos (ej. QA:
 // https://price-simulator-facade-qa.uesiglo21.edu.ar/api/v1). Default: prod.
@@ -52,6 +55,14 @@ export interface PeriodPriceResult {
   totalDiscounts?: number;
   rawResponse?: string;
   errorDetail?: string;
+  /** Rol que le asigna el lambda (ED/EHD): principal visible o alternativo oculto */
+  role?: "primary" | "alternative";
+  /** Clave del bimestre en la tabla hardcodeada del lambda (ej: "2A/26") */
+  periodKey?: string;
+  /** Nombre legible del período según la tabla del lambda (ej: "agosto 2026") */
+  periodLabel?: string;
+  /** Meses de cursado que abarca el período según la API (ej: "agosto 2026 a octubre 2026") */
+  coverageLabel?: string;
 }
 
 export type VerdictCode =
@@ -83,6 +94,10 @@ export interface DiagnosisResult {
   periodPrices: PeriodPriceResult[];
   turnoCode?: string;
   turnoName?: string;
+  /** Clave del período activo según la tabla hardcodeada del lambda (ED/EHD) */
+  primaryPeriodKey?: string;
+  /** Nombre legible del período activo (ej: "agosto 2026") */
+  primaryPeriodName?: string;
   totalDurationMs: number;
 }
 
@@ -99,6 +114,90 @@ export const MODALITY_NAMES: Record<number, string> = {
 };
 
 const PRESENCIAL_MODALITIES = new Set([5, 9, 10, 12]);
+const ED_EHD_MODALITIES = new Set([1, 2]);
+
+// ── Selección del período activo ED/EHD ───────────────────────────────────────
+// Réplica de la tabla hardcodeada y la regla de selección del lambda
+// (pkg/services/pricing-service.go — rama fix/active-period, ticket HF-0113).
+// Mantener en sync con el lambda: al inicio de cada ciclo se AGREGAN filas nuevas
+// (las claves llevan el ciclo, ej. "1A/27"), no se reemplazan las vigentes.
+
+interface BimesterPeriodInfo {
+  fechaInicio: string; // inicio ventana de venta (dd/mm/yyyy)
+  fechaFin: string; // fin ventana de venta oficial (dd/mm/yyyy)
+  fechaExtension: string; // límite de extensión de venta (dd/mm/yyyy) — "" si no hay
+  inicioClases: string; // inicio de clases (dd/mm/yyyy)
+  nombre: string; // nombre legible (ej: "agosto 2026")
+}
+
+const ED_EHD_PERIODS: Record<string, BimesterPeriodInfo> = {
+  "1A/26": { fechaInicio: "25/08/2025", fechaFin: "15/03/2026", fechaExtension: "29/03/2026", inicioClases: "16/03/2026", nombre: "marzo 2026" },
+  "1B/26": { fechaInicio: "16/03/2026", fechaFin: "17/05/2026", fechaExtension: "31/05/2026", inicioClases: "18/05/2026", nombre: "mayo 2026" },
+  "2A/26": { fechaInicio: "18/05/2026", fechaFin: "02/08/2026", fechaExtension: "16/08/2026", inicioClases: "03/08/2026", nombre: "agosto 2026" },
+  "2B/26": { fechaInicio: "03/08/2026", fechaFin: "04/10/2026", fechaExtension: "18/10/2026", inicioClases: "05/10/2026", nombre: "octubre 2026" },
+  "1A/27": { fechaInicio: "28/07/2026", fechaFin: "14/03/2027", fechaExtension: "", inicioClases: "15/03/2027", nombre: "marzo 2027" },
+};
+
+// Orden cronológico por inicio de clases: ante un overlap gana el primero cuya
+// ventana (incluida la extensión) contiene la fecha de hoy.
+const ED_EHD_PERIOD_ORDER = ["1A/26", "1B/26", "2A/26", "2B/26", "1A/27"];
+
+function parseDdMmYyyy(value: string): number | null {
+  const m = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  return Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+}
+
+/** Fecha de hoy (UTC, truncada al día) — mismo criterio que el lambda. */
+function todayUtc(): number {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+}
+
+/**
+ * Período activo: el de inicio de clases más próximo cuya ventana de venta
+ * —incluida la extensión— contiene la fecha de hoy. Mientras un bimestre esté
+ * en extensión sigue siendo el principal aunque el siguiente ya haya abierto
+ * su venta. Devuelve "" si ninguna ventana contiene la fecha.
+ */
+export function getActiveEdEhdPeriodKey(today: number = todayUtc()): string {
+  for (const key of ED_EHD_PERIOD_ORDER) {
+    const info = ED_EHD_PERIODS[key];
+    const inicio = parseDdMmYyyy(info.fechaInicio);
+    const cierre = parseDdMmYyyy(info.fechaExtension || info.fechaFin);
+    if (inicio === null || cierre === null) continue;
+    if (today >= inicio && today <= cierre) return key;
+  }
+  return "";
+}
+
+/** "1/27" + "A" → "1A/27" (el ciclo es parte de la clave, igual que en el lambda). */
+export function buildEdEhdPeriodKey(periodName: string, subperiod: string): string {
+  if (!periodName || !subperiod) return "";
+  const parts = periodName.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return "";
+  return `${parts[0]}${subperiod}/${parts[1]}`;
+}
+
+const SPANISH_MONTHS = [
+  "enero", "febrero", "marzo", "abril", "mayo", "junio",
+  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+];
+
+function monthYearLabel(isoDate?: string): string {
+  if (!isoDate) return "";
+  const m = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return "";
+  return `${SPANISH_MONTHS[Number(m[2]) - 1]} ${m[1]}`;
+}
+
+/** "2026-08-03" + "2026-10-03" → "agosto 2026 a octubre 2026" (igual que el lambda). */
+function coverageLabelFromDates(from?: string, to?: string): string {
+  const start = monthYearLabel(from);
+  const end = monthYearLabel(to);
+  if (!start || !end) return "";
+  return `${start} a ${end}`;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -266,6 +365,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
   const startedAt = Date.now();
   const steps: StepResult[] = [];
   const periodPrices: PeriodPriceResult[] = [];
+  const primarySel: { key?: string; name?: string } = {};
 
   const finish = (
     verdict: Verdict,
@@ -277,6 +377,8 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
     verdict,
     steps,
     periodPrices,
+    primaryPeriodKey: primarySel.key,
+    primaryPeriodName: primarySel.name,
     totalDurationMs: Date.now() - startedAt,
     ...extra,
   });
@@ -545,12 +647,70 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
       .join(", ")}.`,
   });
 
+  // ── Paso 5b: Selección del período activo (ED/EHD, igual que el lambda) ────
+  // El lambda elige UN período principal con su tabla hardcodeada (regla del
+  // ticket HF-0113: gana el de inicio de clases más próximo cuya ventana de
+  // venta —incluida la extensión— contiene la fecha de hoy). El resto queda
+  // como alternativos ocultos que el bot solo ofrece si rechazan el principal.
+  let primaryItemId: number | undefined;
+  if (ED_EHD_MODALITIES.has(modalityId)) {
+    const itemKey = (i: RawPeriodItem) =>
+      buildEdEhdPeriodKey(i.name ?? i.period?.name ?? "", i.subperiod ?? "");
+    const activeKey = getActiveEdEhdPeriodKey();
+    const match = activeKey ? periodItems.find((i) => itemKey(i) === activeKey) : undefined;
+    const activeInfo = activeKey ? ED_EHD_PERIODS[activeKey] : undefined;
+
+    if (match) {
+      primaryItemId = match.id;
+      primarySel.key = activeKey;
+      primarySel.name = activeInfo?.nombre;
+      steps.push({
+        id: "periodo-activo",
+        title: "Selección del período activo (tabla del middleware)",
+        status: "ok",
+        detail: `Período activo según la tabla hardcodeada: ${activeKey} (${activeInfo?.nombre ?? "?"}), ventana de venta ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""}. Ese es el precio que ve el estudiante; los demás períodos quedan como alternativos ocultos.`,
+      });
+    } else if (activeKey) {
+      // Mismo fallback que el lambda: sin match exacto usa el primer item de la API.
+      primaryItemId = periodItems[0]?.id;
+      primarySel.key = activeKey;
+      primarySel.name = activeInfo?.nombre;
+      steps.push({
+        id: "periodo-activo",
+        title: "Selección del período activo (tabla del middleware)",
+        status: "warning",
+        detail: `La tabla hardcodeada indica que el activo es ${activeKey} (${activeInfo?.nombre ?? "?"}), pero Siglo 21 NO devolvió ese período. El middleware usa como respaldo el primer período de la lista (${periodItems[0] ? `${periodItems[0].name ?? "?"}-${periodItems[0].subperiod ?? "?"}` : "—"}). Verificar si la tabla del middleware está desactualizada o si falta el período del lado de Siglo 21.`,
+      });
+    } else {
+      steps.push({
+        id: "periodo-activo",
+        title: "Selección del período activo (tabla del middleware)",
+        status: "warning",
+        detail: "Ninguna ventana de venta de la tabla hardcodeada del middleware contiene la fecha de hoy: el middleware respondería con derivación a Admisión (sin precio). Hay que cargar las fechas del ciclo nuevo en la tabla.",
+      });
+    }
+  }
+
   // ── Paso 6: Precios por período (secuencial, igual que el lambda) ──────────
   for (const item of periodItems) {
     const periodId = item.period?.id ?? 0;
     const subPeriodId = item.id;
     const subPeriod = item.subperiod ?? "";
     const periodName = item.name ?? item.period?.name ?? "?";
+    const periodKey = ED_EHD_MODALITIES.has(modalityId)
+      ? buildEdEhdPeriodKey(periodName, subPeriod)
+      : "";
+    const roleFields: Pick<PeriodPriceResult, "role" | "periodKey" | "periodLabel" | "coverageLabel"> = {
+      role:
+        primaryItemId === undefined
+          ? undefined
+          : item.id === primaryItemId
+            ? "primary"
+            : "alternative",
+      periodKey: periodKey || undefined,
+      periodLabel: (periodKey && ED_EHD_PERIODS[periodKey]?.nombre) || undefined,
+      coverageLabel: coverageLabelFromDates(item.from, item.to) || undefined,
+    };
 
     const preciosUrl = `${BASE_URL}/precios/carrera/${programId}/modalidad/${modalityId}/cau/${encodeURIComponent(cauId)}/turno/${encodeURIComponent(turnoCode)}/periodo/${periodId}/subperiodo/${subPeriodId}/codigo/${encodeURIComponent(subPeriod)}`;
     const outcome = await timedFetch(preciosUrl, token);
@@ -583,6 +743,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
         totalDiscounts,
         rawResponse: truncate(outcome.body),
         errorDetail: parseError,
+        ...roleFields,
       });
     } else {
       periodPrices.push({
@@ -596,6 +757,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
         durationMs: outcome.durationMs,
         rawResponse: truncate(outcome.body),
         errorDetail: describeHttpFailure(outcome),
+        ...roleFields,
       });
     }
   }
