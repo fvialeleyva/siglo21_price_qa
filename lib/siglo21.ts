@@ -191,8 +191,27 @@ function monthYearLabel(isoDate?: string): string {
   return `${SPANISH_MONTHS[Number(m[2]) - 1]} ${m[1]}`;
 }
 
-/** "2026-08-03" + "2026-10-03" → "agosto 2026 a octubre 2026" (igual que el lambda). */
-function coverageLabelFromDates(from?: string, to?: string): string {
+// Meses de cursado que cubre el arancel de cada bimestre — regla comercial fija
+// de Siglo 21 (el arancel de los períodos A incluye ambos bimestres del
+// cuatrimestre). Igual que el lambda (edEhdCoverageMonths).
+const COVERAGE_MONTHS: Record<string, [string, string]> = {
+  "1A": ["marzo", "julio"],
+  "1B": ["mayo", "julio"],
+  "2A": ["agosto", "diciembre"],
+  "2B": ["octubre", "diciembre"],
+};
+
+/**
+ * "2B/26" → "octubre 2026 a diciembre 2026" (regla comercial fija, año del
+ * ciclo). Si la clave no es reconocible, cae a las fechas de cursado de la API.
+ */
+function coverageLabel(periodKey: string, from?: string, to?: string): string {
+  const months = COVERAGE_MONTHS[periodKey.slice(0, 2)];
+  const cycle = periodKey.split("/")[1];
+  if (months && cycle && /^\d{2}$/.test(cycle)) {
+    const year = 2000 + Number(cycle);
+    return `${months[0]} ${year} a ${months[1]} ${year}`;
+  }
   const start = monthYearLabel(from);
   const end = monthYearLabel(to);
   if (!start || !end) return "";
@@ -709,7 +728,7 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
             : "alternative",
       periodKey: periodKey || undefined,
       periodLabel: (periodKey && ED_EHD_PERIODS[periodKey]?.nombre) || undefined,
-      coverageLabel: coverageLabelFromDates(item.from, item.to) || undefined,
+      coverageLabel: coverageLabel(periodKey, item.from, item.to) || undefined,
     };
 
     const preciosUrl = `${BASE_URL}/precios/carrera/${programId}/modalidad/${modalityId}/cau/${encodeURIComponent(cauId)}/turno/${encodeURIComponent(turnoCode)}/periodo/${periodId}/subperiodo/${subPeriodId}/codigo/${encodeURIComponent(subPeriod)}`;
