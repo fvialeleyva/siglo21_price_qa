@@ -106,15 +106,24 @@ export interface DiagnosisResult {
 export const MODALITY_NAMES: Record<number, string> = {
   1: "DISTANCIA - ED HOME [EDH]",
   2: "DISTANCIA - EDUCACIÓN DISTRIBUIDA [ED]",
-  5: "PRESENCIAL HOME [PH - CÓRDOBA]",
+  3: "PRESENCIAL",
+  5: "PRESENCIAL HOME",
   7: "PRESENCIAL HOME RÍO IV [PH - RIVO]",
   9: "PRESENCIAL",
   10: "PRESENCIAL RÍO IV",
   12: "PRESENCIAL DISTRIBUIDA [PD]",
 };
 
-const PRESENCIAL_MODALITIES = new Set([5, 9, 10, 12]);
-const ED_EHD_MODALITIES = new Set([1, 2]);
+const PRESENCIAL_MODALITIES = new Set([9, 10, 12]);
+const ED_EHD_MODALITIES = new Set([1, 2, 3, 5]);
+
+// CAU forzado por modalidad (igual que el lambda, forcedCauByModality): para las
+// modalidades 3 y 5 el middleware usa SIEMPRE este CAU, ignorando el del request.
+// Ambas cotizan con la lógica bimestral ED/EHD. Solo aplica a V4.
+const FORCED_CAU_BY_MODALITY: Record<number, string> = {
+  3: "C60",
+  5: "C20",
+};
 
 // ── Selección del período activo ED/EHD ───────────────────────────────────────
 // Réplica de la tabla hardcodeada y la regla de selección del lambda
@@ -404,9 +413,13 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
 
   // ── Paso 1: Validación de campos (igual que validatePricingRequestV4) ──────
   const missing: string[] = [];
-  const cauId = typeof raw.cau_id === "string" ? raw.cau_id.trim() : "";
+  const rawCauId = typeof raw.cau_id === "string" ? raw.cau_id.trim() : "";
   const modalityId = typeof raw.modality_id === "number" ? raw.modality_id : NaN;
   const programId = typeof raw.program_id === "number" ? raw.program_id : NaN;
+
+  // Modalidades 3 y 5: el CAU se fuerza internamente, así que no se exige en el request
+  const forcedCau = Number.isFinite(modalityId) ? FORCED_CAU_BY_MODALITY[modalityId] : undefined;
+  const cauId = forcedCau ?? rawCauId;
 
   if (!cauId) missing.push("cau_id");
   if (!Number.isFinite(modalityId)) missing.push("modality_id");
@@ -443,6 +456,20 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
     status: "ok",
     detail: `Campos completos: carrera ${programId}, modalidad ${modalityId}, CAU ${cauId}.`,
   });
+
+  // ── Paso 1b: Override de CAU por modalidad (igual que el lambda) ───────────
+  if (forcedCau) {
+    steps.push({
+      id: "cau-override",
+      title: "Override de CAU por modalidad",
+      status: "ok",
+      detail: `La modalidad ${modalityId} (${MODALITY_NAMES[modalityId]}) usa SIEMPRE el CAU ${forcedCau} — regla del middleware pedida por el cliente. ${
+        rawCauId
+          ? `El cau_id del request ("${rawCauId}") se ignora.`
+          : "El request no traía cau_id (para esta modalidad es opcional)."
+      } Todas las consultas a Siglo 21 se hacen con el CAU ${forcedCau}.`,
+    });
+  }
 
   // ── Paso 2: Chequeo de modalidad presencial ────────────────────────────────
   if (PRESENCIAL_MODALITIES.has(modalityId)) {
