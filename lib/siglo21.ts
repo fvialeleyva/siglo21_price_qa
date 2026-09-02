@@ -121,8 +121,8 @@ const ED_EHD_MODALITIES = new Set([1, 2, 3, 5]);
 // modalidades 3 y 5 el middleware usa SIEMPRE este CAU, ignorando el del request.
 // Ambas cotizan con la lógica bimestral ED/EHD. Solo aplica a V4.
 const FORCED_CAU_BY_MODALITY: Record<number, string> = {
-  3: "C60",
-  5: "C20",
+  3: "CBA02",
+  5: "CBA01",
 };
 
 // ── Selección del período activo ED/EHD ───────────────────────────────────────
