@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { DiagnosisResult, PeriodPriceResult, StepResult } from "@/lib/siglo21";
+import { useEffect, useState, type ReactNode } from "react";
+import type { DiagnosisResult, PeriodRow, Quote, StepResult } from "@/lib/siglo21";
 
 // ── Marca Conversia ─────────────────────────────────────────────────────────────
 
@@ -92,19 +92,30 @@ function parseInputs(text: string): { inputs: Record<string, unknown>[]; error?:
 const VERDICT_STYLES: Record<string, { badge: string; card: string; label: string }> = {
   OK: { badge: "bg-primary-600", card: "border-primary-200 bg-primary-50", label: "✅ TODO OK" },
   OK_PARTIAL: { badge: "bg-amber-500", card: "border-amber-200 bg-amber-50", label: "⚠️ OK CON OMISIONES" },
-  PRESENCIAL_MODALITY: { badge: "bg-secondary-600", card: "border-secondary-200 bg-secondary-50", label: "ℹ️ MODALIDAD PRESENCIAL" },
+  ADVISOR_MODALITY: { badge: "bg-secondary-600", card: "border-secondary-200 bg-secondary-50", label: "ℹ️ DERIVA A ASESOR" },
+  INVALID_REQUEST_BODY: { badge: "bg-orange-600", card: "border-orange-200 bg-orange-50", label: "✏️ REQUEST INVÁLIDO" },
   MISSING_REQUIRED_FIELD: { badge: "bg-orange-600", card: "border-orange-200 bg-orange-50", label: "✏️ DATOS INCOMPLETOS" },
+  UNSUPPORTED_MODALITY: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "🚫 MODALIDAD NO SOPORTADA EN V4" },
   AUTH_FAILED: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "🔒 FALLÓ AUTENTICACIÓN" },
   NO_SCHEDULES_AVAILABLE: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "❌ SIN TURNOS" },
   NO_PERIODS_AVAILABLE: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "❌ SIN PERÍODOS" },
+  NO_ACTIVE_ED_EHD_PERIOD: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "📅 SIN PERÍODO ACTIVO EN LA TABLA" },
   PRICE_FETCH_ERROR: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "❌ FALLÓ PRECIO" },
 };
 
 const RESPONSIBLE_LABELS: Record<string, string> = {
   siglo21: "🏛️ Reportar a Siglo 21",
   config: "🛠️ Corregir datos / configuración",
+  middleware: "🔧 Comportamiento del middleware (Conversia) a revisar",
   comportamiento_esperado: "✔️ Comportamiento esperado (no es una falla)",
   nadie: "✔️ Sin acción necesaria",
+};
+
+const BRANCH_LABELS: Record<string, string> = {
+  validation: "validación",
+  advisor: "deriva a asesor (9, 10, 12)",
+  bimester: "bimestral (1, 2, 3, 4, 5, 7)",
+  unsupported: "sin lógica de precio",
 };
 
 const STEP_ICONS: Record<string, string> = {
@@ -112,6 +123,13 @@ const STEP_ICONS: Record<string, string> = {
   fail: "❌",
   warning: "⚠️",
   skipped: "⏭️",
+};
+
+const USE_BADGES: Record<string, string> = {
+  primary: "bg-primary-100 text-primary-800 border-primary-200 font-bold",
+  alternative: "bg-gray-100 text-gray-600 border-gray-200",
+  alternative_not_shown: "bg-amber-50 text-amber-800 border-amber-200",
+  ignored: "bg-white text-gray-400 border-gray-200",
 };
 
 function money(n?: number): string {
@@ -169,52 +187,52 @@ function StepRow({ step }: { step: StepResult }) {
   );
 }
 
-function PeriodRow({ p }: { p: PeriodPriceResult }) {
+function PeriodTableRow({ p }: { p: PeriodRow }) {
   const [open, setOpen] = useState(false);
+  const f = p.fetch;
   return (
     <>
-      <tr className={p.ok ? "" : "bg-red-50"}>
-        <td className="px-3 py-2 whitespace-nowrap">{p.ok ? "✅" : "❌"}</td>
+      <tr className={f && !f.ok ? "bg-red-50" : ""}>
+        <td className="px-3 py-2 whitespace-nowrap">{f ? (f.ok ? "✅" : "❌") : "—"}</td>
         <td className="px-3 py-2 whitespace-nowrap">
-          <span className="font-mono">{p.periodName}-{p.subPeriod}</span>
-          {p.periodLabel && <span className="ml-1.5 text-xs text-gray-500">{p.periodLabel}</span>}
-          {p.role === "primary" && (
-            <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wide bg-primary-100 text-primary-800 border border-primary-200 rounded-full px-2 py-0.5 align-middle">
-              principal
-            </span>
-          )}
-          {p.role === "alternative" && (
-            <span className="ml-1.5 text-[10px] uppercase tracking-wide bg-gray-100 text-gray-600 border border-gray-200 rounded-full px-2 py-0.5 align-middle">
-              alternativo
-            </span>
-          )}
+          <span className="font-mono">{p.name || "?"}-{p.subPeriod || "?"}</span>
+          {p.keyLabel && <span className="ml-1.5 text-xs text-gray-500">{p.keyLabel}</span>}
         </td>
-        <td className="px-3 py-2 whitespace-nowrap">{p.ok ? money(p.total) : "—"}</td>
         <td className="px-3 py-2">
-          {p.ok ? (
-            <span className="text-gray-500 text-xs">HTTP {p.httpStatus} · {p.durationMs} ms</span>
+          <span className={`text-[11px] border rounded-full px-2 py-0.5 ${USE_BADGES[p.use]}`}>{p.useLabel}</span>
+        </td>
+        <td className="px-3 py-2 whitespace-nowrap">{f?.ok ? money(f.total) : "—"}</td>
+        <td className="px-3 py-2">
+          {f ? (
+            f.ok ? (
+              <span className="text-gray-500 text-xs">HTTP {f.httpStatus} · {f.durationMs} ms</span>
+            ) : (
+              <span className="text-red-700 text-xs">{f.errorDetail}</span>
+            )
           ) : (
-            <span className="text-red-700 text-xs">{p.errorDetail}</span>
+            <span className="text-gray-400 text-xs">no consultado</span>
           )}
         </td>
         <td className="px-3 py-2 text-right">
-          <button onClick={() => setOpen(!open)} className="text-xs text-secondary-600 hover:underline whitespace-nowrap">
-            {open ? "ocultar ▲" : "detalle ▼"}
-          </button>
+          {f && (
+            <button onClick={() => setOpen(!open)} className="text-xs text-secondary-600 hover:underline whitespace-nowrap">
+              {open ? "ocultar ▲" : "detalle ▼"}
+            </button>
+          )}
         </td>
       </tr>
-      {open && (
+      {open && f && (
         <tr>
-          <td colSpan={5} className="px-3 pb-3">
+          <td colSpan={6} className="px-3 pb-3">
             <div className="text-xs bg-gray-900 text-gray-100 rounded p-3 overflow-x-auto space-y-2">
               <div>
                 <span className="text-gray-400">URL:</span>{" "}
-                <span className="font-mono break-all">GET {p.url}</span>
+                <span className="font-mono break-all">GET {f.url}</span>
               </div>
-              {p.rawResponse && (
+              {f.rawResponse && (
                 <div>
                   <span className="text-gray-400">Respuesta cruda:</span>
-                  <pre className="font-mono whitespace-pre-wrap break-all mt-1">{p.rawResponse}</pre>
+                  <pre className="font-mono whitespace-pre-wrap break-all mt-1">{f.rawResponse}</pre>
                 </div>
               )}
             </div>
@@ -225,12 +243,20 @@ function PeriodRow({ p }: { p: PeriodPriceResult }) {
   );
 }
 
+function lambdaOutputText(r: DiagnosisResult): string {
+  const body = r.lambdaResponse.body as { output?: unknown; error?: unknown };
+  if (typeof body?.output === "string") return body.output;
+  if (typeof body?.error === "string") return body.error;
+  return JSON.stringify(body, null, 2);
+}
+
 function buildReport(r: DiagnosisResult): string {
   const lines: string[] = [];
-  lines.push(`DIAGNÓSTICO SIGLO 21 — carrera ${r.input.program_id} / modalidad ${r.input.modality_id} (${r.modalityName}) / CAU ${r.input.cau_id}`);
-  lines.push(`Resultado: ${r.verdict.code} (equivale a HTTP ${r.verdict.httpEquivalent} del middleware)`);
+  lines.push(`DIAGNÓSTICO SIGLO 21 (get-price-v4) — carrera ${r.input.program_id} / modalidad ${r.input.modality_id} (${r.modalityName}) / CAU ${r.input.cau_id}`);
+  lines.push(`Resultado: ${r.verdict.code} — get-price-v4 respondería HTTP ${r.verdict.httpEquivalent} · rama: ${BRANCH_LABELS[r.branch]}`);
   lines.push(`${r.verdict.title}: ${r.verdict.explanation}`);
-  if (r.turnoCode) lines.push(`Turno usado: ${r.turnoName} (código ${r.turnoCode})`);
+  lines.push(`Evaluado: ${r.evaluatedAt}`);
+  if (r.turnoCode !== undefined) lines.push(`Turno usado: ${r.turnoName} (código ${r.turnoCode})`);
   lines.push("");
   lines.push("Pasos:");
   for (const s of r.steps) {
@@ -238,173 +264,182 @@ function buildReport(r: DiagnosisResult): string {
     if (s.url) lines.push(`    URL: ${s.method} ${s.url}`);
     if (s.status === "fail" && s.rawResponse) lines.push(`    Respuesta: ${s.rawResponse.slice(0, 500)}`);
   }
-  if (r.periodPrices.length > 0) {
+  if (r.periods.length > 0) {
     lines.push("");
-    lines.push("Precios por período:");
-    for (const p of r.periodPrices) {
-      const rol = p.role === "primary" ? " · PRINCIPAL (el que ve el estudiante)" : p.role === "alternative" ? " · alternativo oculto" : "";
-      const cursado = p.coverageLabel ? ` · cursado: ${p.coverageLabel}` : "";
-      if (p.ok) {
-        lines.push(`  [OK] ${p.periodName}-${p.subPeriod}${p.periodLabel ? ` (${p.periodLabel})` : ""}: total del período ${p.total}${rol}${cursado}`);
-      } else {
-        lines.push(`  [FALLÓ] ${p.periodName}-${p.subPeriod}${rol}: ${p.errorDetail}`);
-        lines.push(`    URL: GET ${p.url}`);
-        if (p.rawResponse) lines.push(`    Respuesta: ${p.rawResponse.slice(0, 500)}`);
+    lines.push("Períodos devueltos por Siglo 21 y uso en v4:");
+    for (const p of r.periods) {
+      const f = p.fetch;
+      const precio = f ? (f.ok ? ` · total del período ${f.total}` : ` · FALLÓ: ${f.errorDetail}`) : "";
+      lines.push(`  ${p.name}-${p.subPeriod}${p.keyLabel ? ` (${p.keyLabel})` : ""}: ${p.useLabel}${precio}`);
+      if (f && !f.ok) {
+        lines.push(`    URL: GET ${f.url}`);
+        if (f.rawResponse) lines.push(`    Respuesta: ${f.rawResponse.slice(0, 500)}`);
       }
     }
   }
+  lines.push("");
+  lines.push(`Respuesta de get-price-v4: HTTP ${r.lambdaResponse.httpStatus}`);
+  lines.push(lambdaOutputText(r).slice(0, 1500));
   return lines.join("\n");
 }
 
 // ── Ejemplo del mensaje que daría el agente IA al estudiante ───────────────────
 
-type BotPreview =
-  | {
-      tone: "price";
-      cuota6: number;
-      cuota3: number;
-      periodLabel?: string;
-      coverageLabel?: string;
-      alternatives: { label: string; cuota6: number; coverageLabel?: string }[];
-    }
-  | { tone: "advisor" }
-  | { tone: "derive" }
-  | { tone: "none"; reason: string };
-
-/**
- * El período principal es el que el middleware marca como activo con su tabla
- * hardcodeada (rol "primary") — no necesariamente el primero que devuelve la
- * API de Siglo 21. Si no hay roles (modalidad no ED/EHD), se usa el primero.
- */
-function splitPrimaryAndAlternatives(r: DiagnosisResult) {
-  const okPeriods = r.periodPrices.filter((p) => p.ok && typeof p.total === "number");
-  if (okPeriods.length === 0) return { primary: undefined, alternatives: [] as PeriodPriceResult[] };
-  const primary = okPeriods.find((p) => p.role === "primary") ?? okPeriods[0];
-  return { primary, alternatives: okPeriods.filter((p) => p !== primary) };
+function BotBubble({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="shrink-0 grid place-items-center w-9 h-9 rounded-full bg-primary-100 border border-primary-200">
+        <ConversiaMark className="w-5 h-5" />
+      </span>
+      <div className="min-w-0 flex-1 bg-white border border-gray-200 rounded-2xl rounded-tl-md p-4 shadow-sm text-brand-ink">
+        {children}
+      </div>
+    </div>
+  );
 }
 
-function periodDisplayLabel(p: PeriodPriceResult): string {
-  return p.periodLabel ?? `${p.periodName}-${p.subPeriod}`;
+function PriceSentence({ children }: { children: ReactNode }) {
+  return (
+    <div className="my-2 rounded-xl bg-primary-50 border border-primary-100 px-3 py-2">
+      <p className="font-semibold text-primary-800">{children}</p>
+    </div>
+  );
 }
 
-function botPreview(r: DiagnosisResult): BotPreview {
-  const code = r.verdict.code;
-  if (code === "PRESENCIAL_MODALITY") return { tone: "advisor" };
-  if (code === "MISSING_REQUIRED_FIELD")
-    return {
-      tone: "none",
-      reason:
-        "El agente IA no llega a responder nada: la consulta ni siquiera se arma porque faltan datos obligatorios. Es un problema de configuración, no algo que el estudiante llegue a ver.",
-    };
-
-  const { primary, alternatives } = splitPrimaryAndAlternatives(r);
-  if (primary) {
-    const total = primary.total as number;
-    const round2 = (n: number) => Math.round(n * 100) / 100;
-    return {
-      tone: "price",
-      cuota6: round2(total / 6),
-      cuota3: round2(total / 3),
-      periodLabel: periodDisplayLabel(primary),
-      coverageLabel: primary.coverageLabel,
-      alternatives: alternatives.map((p) => ({
-        label: periodDisplayLabel(p),
-        cuota6: round2((p.total as number) / 6),
-        coverageLabel: p.coverageLabel,
-      })),
-    };
-  }
-
-  // AUTH_FAILED · NO_SCHEDULES_AVAILABLE · NO_PERIODS_AVAILABLE · PRICE_FETCH_ERROR
-  return { tone: "derive" };
+function QuoteMessage({ q }: { q: Quote }) {
+  return (
+    <>
+      <p className="text-sm">
+        Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en {q.periodName}.
+      </p>
+      {q.courseCoverageLine && <p className="text-sm mt-1">{q.courseCoverageLine}</p>}
+      <PriceSentence>
+        Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de {money(q.cuota6)} (dependiendo
+        del banco de tu tarjeta).
+      </PriceSentence>
+      <p className="text-sm text-gray-700">
+        Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y materiales de estudio
+        digitales y acceso a biblioteca.
+      </p>
+      <p className="mt-1 text-sm font-medium">¿Te parece viable esta forma de pago?</p>
+      <div className="mt-3 border-t border-dashed border-gray-200 pt-2 text-xs text-gray-500 space-y-1">
+        {q.coverageLabel && (
+          <p>
+            🗓️ El agente aclara los meses de cursado: <span className="font-semibold text-gray-700">{q.coverageLabel}</span>.
+          </p>
+        )}
+        <p>
+          🔁 Si el estudiante no puede con 6 cuotas, ofrece{" "}
+          <span className="font-semibold text-gray-700">3 cuotas fijas de {money(q.cuota3)}</span>.
+        </p>
+        {q.alternatives.length > 0 && (
+          <p>
+            📅 {q.alternatives.length} período(s) alternativo(s) que ofrece{" "}
+            <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>:{" "}
+            {q.alternatives
+              .map((a) => `${a.name} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
+              .join(" · ")}
+            .
+          </p>
+        )}
+        {q.fallbackPeriod && (
+          <p className="text-amber-700">
+            ⚠️ El monto es del período {q.fallbackPeriod} (respaldo: Siglo 21 no devolvió {q.periodKey}), pero el texto
+            dice {q.periodName}.
+          </p>
+        )}
+      </div>
+    </>
+  );
 }
 
 function BotMessage({ result }: { result: DiagnosisResult }) {
-  const preview = botPreview(result);
+  const code = result.verdict.code;
+  let body: ReactNode;
+
+  if (result.quote) {
+    body = <QuoteMessage q={result.quote} />;
+  } else if (code === "ADVISOR_MODALITY") {
+    body = (
+      <>
+        <p className="text-sm">
+          Para conocer el arancel y las opciones de inscripción de esta modalidad, lo mejor es que hables con un{" "}
+          <span className="font-semibold">asesor de Admisión</span>, que te va a dar toda la información completa.
+          ¿Querés que te conecte con uno?
+        </p>
+        <p className="mt-2 text-xs text-gray-500">
+          ℹ️ get-price-v4 responde 200 con la instrucción de derivar (sin consultar a Siglo 21).
+        </p>
+      </>
+    );
+  } else if (code === "MISSING_REQUIRED_FIELD" || code === "INVALID_REQUEST_BODY") {
+    body = (
+      <p className="text-sm text-gray-600">
+        get-price-v4 responde 400 antes de consultar nada: el request de la tool viene mal armado. Es un problema de
+        configuración.
+      </p>
+    );
+  } else {
+    body = (
+      <>
+        <p className="text-sm">
+          En este momento no tengo ese dato a mano, pero puedo conectarte con el equipo de{" "}
+          <span className="font-semibold">Admisión</span> para que te den toda la información completa. ¿Querés que te
+          conecte con un asesor que te ayude con esto?
+        </p>
+        <p className="mt-2 text-xs text-gray-500">
+          🤫 Con HTTP {result.lambdaResponse.httpStatus} el agente recibe la instrucción de error: deriva sin mencionar la
+          falla ni inventar precios.
+        </p>
+      </>
+    );
+  }
+
   return (
     <div className="mt-5">
       <p className="text-xs font-semibold uppercase tracking-wide text-primary-700 mb-2">
         💬 Lo que le diría el agente IA al estudiante
       </p>
-      <div className="flex items-start gap-3">
-        <span className="shrink-0 grid place-items-center w-9 h-9 rounded-full bg-primary-100 border border-primary-200">
-          <ConversiaMark className="w-5 h-5" />
-        </span>
-        <div className="min-w-0 flex-1 bg-white border border-gray-200 rounded-2xl rounded-tl-md p-4 shadow-sm text-brand-ink">
-          {preview.tone === "price" && (
-            <>
-              <p className="text-sm">
-                Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio
-                {preview.periodLabel ? ` en ${preview.periodLabel}` : ""}.
-              </p>
-              <div className="my-2 rounded-xl bg-primary-50 border border-primary-100 px-3 py-2">
-                <p className="font-semibold text-primary-800">
-                  Hoy podés inscribirte y abonar el período de cursado en 6 cuotas fijas de{" "}
-                  {money(preview.cuota6)} (dependiendo del banco de tu tarjeta).
-                </p>
-              </div>
-              {preview.coverageLabel && (
-                <p className="text-sm text-gray-700">
-                  Este período cubre el cursado de <span className="font-semibold">{preview.coverageLabel}</span>.
-                </p>
-              )}
-              <p className="text-sm text-gray-700">
-                Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y
-                materiales de estudio digitales y acceso a biblioteca.
-              </p>
-              <p className="mt-1 text-sm font-medium">¿Te parece viable esta forma de pago?</p>
-              <div className="mt-3 border-t border-dashed border-gray-200 pt-2 text-xs text-gray-500 space-y-1">
-                <p>
-                  🔁 Si el estudiante no puede con 6 cuotas, el agente IA ofrece{" "}
-                  <span className="font-semibold text-gray-700">3 cuotas de {money(preview.cuota3)}</span>.
-                </p>
-                {preview.alternatives.length > 0 && (
-                  <p>
-                    📅 Además tiene {preview.alternatives.length} período(s) alternativo(s) que ofrece{" "}
-                    <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>, aclarando
-                    siempre qué meses cubre cada uno:{" "}
-                    {preview.alternatives
-                      .map((a) => `${a.label} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
-                      .join(" · ")}
-                    .
-                  </p>
-                )}
-              </div>
-            </>
-          )}
-
-          {preview.tone === "advisor" && (
-            <>
-              <p className="text-sm">
-                Para conocer el arancel y las opciones de inscripción de esta modalidad, lo mejor es
-                que hables con un <span className="font-semibold">asesor de Admisión</span>, que te va a
-                dar toda la información completa. ¿Querés que te conecte con uno?
-              </p>
-              <p className="mt-2 text-xs text-gray-500">
-                ℹ️ Modalidad presencial: el agente IA deriva a Admisión y nunca inventa ni estima precios.
-              </p>
-            </>
-          )}
-
-          {preview.tone === "derive" && (
-            <>
-              <p className="text-sm">
-                En este momento no tengo ese dato a mano, pero puedo conectarte con el equipo de{" "}
-                <span className="font-semibold">Admisión</span> para que te den toda la información
-                completa. ¿Querés que te conecte con un asesor que te ayude con esto?
-              </p>
-              <p className="mt-2 text-xs text-gray-500">
-                🤫 El agente IA nunca menciona que hubo una falla ni inventa precios: solo deriva con calidez.
-              </p>
-            </>
-          )}
-
-          {preview.tone === "none" && <p className="text-sm text-gray-600">{preview.reason}</p>}
-        </div>
-      </div>
+      <BotBubble>{body}</BotBubble>
       <p className="text-xs text-gray-400 mt-2 ml-12">
-        Ejemplo ilustrativo — el texto final lo arma Conversia con sus plantillas y puede variar; los
-        montos salen del precio real obtenido arriba.
+        Ejemplo ilustrativo — el texto exacto que recibe el agente está en “Respuesta de get-price-v4”; los montos
+        salen del precio real obtenido arriba.
+      </p>
+    </div>
+  );
+}
+
+// ── Respuesta exacta del lambda ────────────────────────────────────────────────
+
+function LambdaResponseBlock({ result }: { result: DiagnosisResult }) {
+  const [open, setOpen] = useState(false);
+  const status = result.lambdaResponse.httpStatus;
+  const body = result.lambdaResponse.body as { output?: unknown };
+  const field = typeof body?.output === "string" ? "output" : "error";
+  return (
+    <div className="mt-3 bg-white rounded-lg border border-gray-200 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-gray-900 text-sm">📦 Respuesta de get-price-v4</span>
+          <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${status < 400 ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
+            HTTP {status}
+          </span>
+          <span className="text-xs text-gray-500">rama: {BRANCH_LABELS[result.branch]} · campo “{field}”</span>
+        </div>
+        <button onClick={() => setOpen(!open)} className="text-xs text-secondary-600 hover:underline">
+          {open ? "Ocultar ▲" : "Ver body ▼"}
+        </button>
+      </div>
+      {open && (
+        <pre className="mt-2 text-xs bg-gray-900 text-gray-100 rounded p-3 overflow-x-auto font-mono whitespace-pre-wrap break-words max-h-[28rem] overflow-y-auto">
+          {typeof body?.output === "string" || typeof (body as { error?: unknown })?.error === "string"
+            ? lambdaOutputText(result)
+            : JSON.stringify(result.lambdaResponse.body, null, 2)}
+        </pre>
+      )}
+      <p className="text-xs text-gray-400 mt-1">
+        Réplica del body que arma el lambda (mismos textos y montos) para comparar con la auditoría de la tool. La línea
+        “Fecha de HOY” usa el momento de este diagnóstico.
       </p>
     </div>
   );
@@ -412,86 +447,42 @@ function BotMessage({ result }: { result: DiagnosisResult }) {
 
 // ── Dialog: el contexto interno que recibiría el agente IA ─────────────────────
 
-function PeriodContextBlock({
+function ContextAmounts({
   title,
   subtitle,
-  period,
+  rows,
   tone,
 }: {
   title: string;
   subtitle?: string;
-  period: PeriodPriceResult;
+  rows: [string, string][];
   tone: "primary" | "alt";
 }) {
-  const total = period.total as number;
-  const cuota6 = Math.round((total / 6) * 100) / 100;
-  const cuota3 = Math.round((total / 3) * 100) / 100;
   const box = tone === "primary" ? "bg-primary-50 border-primary-100" : "bg-gray-50 border-gray-200";
   return (
     <div className={`rounded-xl border ${box} p-4`}>
-      <div className="flex items-center justify-between gap-2">
-        <h5 className="font-semibold text-brand-ink text-sm">{title}</h5>
-        <span className="font-mono text-xs text-gray-600">
-          {period.periodName}-{period.subPeriod}
-        </span>
-      </div>
+      <h5 className="font-semibold text-brand-ink text-sm">{title}</h5>
       {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
-      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-        {period.coverageLabel && (
-          <div className="col-span-2 flex justify-between border-b border-dashed border-gray-200 pb-1.5">
-            <dt className="text-gray-500">Meses de cursado</dt>
-            <dd className="font-medium">{period.coverageLabel}</dd>
+      <dl className="mt-3 space-y-1.5 text-sm">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-4 border-b border-dashed border-gray-200 pb-1.5 last:border-0">
+            <dt className="text-gray-500">{k}</dt>
+            <dd className="font-medium text-right">{v}</dd>
           </div>
-        )}
-        <div className="col-span-2 flex justify-between border-b border-dashed border-gray-200 pb-1.5">
-          <dt className="text-gray-500">Total del período (no de la carrera)</dt>
-          <dd className="font-semibold">{money(total)}</dd>
-        </div>
-        {typeof period.totalListPrice === "number" && (
-          <div className="flex justify-between">
-            <dt className="text-gray-500">Precio de lista</dt>
-            <dd>{money(period.totalListPrice)}</dd>
-          </div>
-        )}
-        {typeof period.totalDiscounts === "number" && (
-          <div className="flex justify-between">
-            <dt className="text-gray-500">Descuento</dt>
-            <dd className="text-primary-700">−{money(period.totalDiscounts)}</dd>
-          </div>
-        )}
-        <div className="flex justify-between">
-          <dt className="text-gray-500">6 cuotas</dt>
-          <dd className="font-semibold">{money(cuota6)}</dd>
-        </div>
-        <div className="flex justify-between">
-          <dt className="text-gray-500">3 cuotas</dt>
-          <dd>{money(cuota3)}</dd>
-        </div>
+        ))}
       </dl>
     </div>
   );
 }
 
-function todayInArgentina() {
-  return new Date().toLocaleDateString("es-AR", {
-    weekday: "long",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    timeZone: "America/Argentina/Buenos_Aires",
-  });
-}
-
-const AGENT_RULES = [
-  "Recibe la fecha de hoy (horario de Argentina) en el contexto y la usa como única referencia temporal para plazos, inicios de clases y períodos.",
-  "La oración del precio es inmutable: no la modifica ni la parafrasea.",
-  "Los montos son únicamente del período de cursado activo (matrícula + aranceles), no de la carrera completa. Si preguntan cuánto cuesta toda la carrera, nunca presenta estos montos como tal: explica que el arancel es por período y ofrece derivar a un asesor de Admisión.",
-  "Al presentar cualquier período (principal o alternativo), aclara siempre qué meses de cursado abarca (ej: \"este período cubre de octubre a diciembre 2026\").",
-  "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca ofrece más por iniciativa propia.",
-  "Nunca inventa ni estima precios.",
-  "Si preguntan por medios de pago, bancos o promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
-  "Prohibido mencionar transferencia bancaria como medio de pago.",
-  "Ante objeción económica con interés real: activa el Protocolo de Beneficios Económicos.",
+const BIMESTER_RULES = [
+  "La oración del precio (y la del período de cursado, si aplica) es inmutable.",
+  "Aclara siempre qué meses de cursado abarca el período que presenta.",
+  "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca más por iniciativa propia.",
+  "Los montos son del período de cursado activo, no de la carrera completa.",
+  "Alternativos: solo si el estudiante rechaza el principal, de a uno por vez.",
+  "Medios de pago / bancos / promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
+  "Prohibido mencionar transferencia bancaria. Objeción económica: Protocolo de Beneficios Económicos.",
   "Al entregar el precio, marca el CRM: interest_qualification_reason = 55.",
 ];
 
@@ -509,8 +500,8 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
     };
   }, [onClose]);
 
-  const { primary, alternatives } = splitPrimaryAndAlternatives(result);
-  const preview = botPreview(result);
+  const q = result.quote;
+  const rules = q ? BIMESTER_RULES : [];
 
   return (
     <div
@@ -529,7 +520,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
             <div>
               <h3 className="font-bold text-brand-ink leading-tight">🧠 Contexto interno del agente IA</h3>
               <p className="text-xs text-gray-500">
-                Lo que el agente recibe además del mensaje — NO se muestra al estudiante.
+                Lo que el agente recibe en el output de get-price-v4 — NO se muestra al estudiante.
               </p>
             </div>
           </div>
@@ -543,80 +534,58 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
         </div>
 
         <div className="px-5 py-4 space-y-5">
-          {primary ? (
+          {q && (
             <>
-              <p className="text-xs text-gray-500">
-                📆 Fecha de HOY para el agente:{" "}
-                <span className="font-semibold text-brand-ink">{todayInArgentina()}</span> — la usa como única
-                referencia temporal.
-              </p>
-              <PeriodContextBlock
-                title={`📋 Período principal${result.primaryPeriodName ? ` — ${result.primaryPeriodName}` : ""}`}
-                subtitle={`El agente arma el bloque de precio con este período${result.primaryPeriodKey ? ` (activo según la tabla del middleware: ${result.primaryPeriodKey})` : ""}.`}
-                period={primary}
+              <ContextAmounts
+                title={`📋 Período principal — ${q.periodName}`}
+                subtitle={`Activo según la tabla del lambda: ${q.periodKey}${q.fallbackPeriod ? ` · monto del período de respaldo ${q.fallbackPeriod}` : ""}`}
                 tone="primary"
+                rows={[
+                  ...(q.coverageLabel ? [["Meses de cursado", q.coverageLabel] as [string, string]] : []),
+                  ["Total del período (no de la carrera)", money(q.total)],
+                  ["6 cuotas", money(q.cuota6)],
+                  ["3 cuotas", money(q.cuota3)],
+                ]}
               />
-
-              {alternatives.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <h4 className="font-semibold text-brand-ink text-sm">📅 Períodos alternativos</h4>
-                    <span className="text-xs bg-secondary-50 text-secondary-700 border border-secondary-100 rounded-full px-2 py-0.5">
-                      ocultos
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-500 mb-2.5">
-                    El agente los ofrece <span className="font-semibold">solo si el estudiante rechaza el principal</span>, de a uno
-                    por vez, aclarando siempre qué meses de cursado abarca cada uno.
-                  </p>
-                  <div className="space-y-2.5">
-                    {alternatives.map((p, i) => (
-                      <PeriodContextBlock
-                        key={i}
-                        title={`Alternativa ${i + 1}${p.periodLabel ? ` — ${p.periodLabel}` : ""}`}
-                        period={p}
-                        tone="alt"
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <h4 className="font-semibold text-brand-ink text-sm mb-2">📏 Instrucciones que recibe el agente</h4>
-                <ul className="space-y-1.5">
-                  {AGENT_RULES.map((r, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-gray-700">
-                      <span className="text-primary-600 shrink-0">✓</span>
-                      <span>{r}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              {q.alternatives.map((a, i) => (
+                <ContextAmounts
+                  key={a.key}
+                  title={`📅 Alternativa ${i + 1} — ${a.name} (${a.key})`}
+                  subtitle="Oculta: solo si el estudiante rechaza el principal."
+                  tone="alt"
+                  rows={[
+                    ...(a.coverageLabel ? [["Meses de cursado", a.coverageLabel] as [string, string]] : []),
+                    ["Total del período", money(a.total)],
+                    ["6 cuotas", money(a.cuota6)],
+                    ["3 cuotas", money(a.cuota3)],
+                  ]}
+                />
+              ))}
             </>
-          ) : (
-            <div className="rounded-xl border border-secondary-100 bg-secondary-25 p-4 text-sm text-gray-700 space-y-2">
-              <h4 className="font-semibold text-brand-ink text-sm">📏 Instrucción que recibe el agente</h4>
-              {preview.tone === "advisor" && (
-                <p>
-                  Derivar al estudiante a un <span className="font-semibold">asesor de Admisión</span> para conocer el
-                  arancel y las opciones de inscripción. No consultar, inventar ni estimar precios.
-                </p>
-              )}
-              {preview.tone === "derive" && (
-                <p>
-                  Informar que en este momento no tiene el dato disponible y ofrecer derivar a Admisión, con tono cálido.
-                  <span className="font-semibold"> Jamás</span> mencionar la falla ni inventar montos, cuotas o precios.
-                </p>
-              )}
-              {preview.tone === "none" && (
-                <p>
-                  No hay contexto de precio: la consulta no llega a ejecutarse porque faltan datos obligatorios en el
-                  request. Es un problema de configuración, previo al agente.
-                </p>
-              )}
+          )}
+
+          {rules.length > 0 && (
+            <div>
+              <h4 className="font-semibold text-brand-ink text-sm mb-2">📏 Instrucciones que recibe el agente</h4>
+              <ul className="space-y-1.5">
+                {rules.map((r, i) => (
+                  <li key={i} className="flex gap-2 text-sm text-gray-700">
+                    <span className="text-primary-600 shrink-0">✓</span>
+                    <span>{r}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
+
+          <div>
+            <h4 className="font-semibold text-brand-ink text-sm mb-2">
+              📦 Texto completo (HTTP {result.lambdaResponse.httpStatus})
+            </h4>
+            <pre className="text-xs bg-gray-900 text-gray-100 rounded p-3 overflow-x-auto font-mono whitespace-pre-wrap break-words">
+              {lambdaOutputText(result)}
+            </pre>
+          </div>
         </div>
       </div>
     </div>
@@ -653,12 +622,14 @@ function ResultCard({ result, index }: { result: DiagnosisResult; index: number 
         </button>
       </div>
 
-      <p className="text-xs text-gray-500 mb-1">{result.modalityName}</p>
+      <p className="text-xs text-gray-500 mb-1">
+        {result.modalityName} · rama v4: {BRANCH_LABELS[result.branch]}
+      </p>
       <h3 className="font-semibold text-gray-900">{result.verdict.title}</h3>
       <p className="text-sm text-gray-700 mt-1">{result.verdict.explanation}</p>
       <p className="text-sm font-medium mt-2">
         {RESPONSIBLE_LABELS[result.verdict.responsible]}
-        <span className="text-gray-400 font-normal"> · el middleware respondería HTTP {result.verdict.httpEquivalent}</span>
+        <span className="text-gray-400 font-normal"> · get-price-v4 respondería HTTP {result.verdict.httpEquivalent}</span>
       </p>
 
       <div className="mt-4 bg-white rounded-lg border border-gray-200 px-4 py-2">
@@ -667,26 +638,29 @@ function ResultCard({ result, index }: { result: DiagnosisResult; index: number 
         ))}
       </div>
 
-      {result.periodPrices.length > 0 && (
+      {result.periods.length > 0 && (
         <div className="mt-3 bg-white rounded-lg border border-gray-200 overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-gray-500 border-b border-gray-200">
                 <th className="px-3 py-2"></th>
-                <th className="px-3 py-2">Período</th>
+                <th className="px-3 py-2">Período (Siglo 21)</th>
+                <th className="px-3 py-2">Uso en v4</th>
                 <th className="px-3 py-2">Total del período</th>
                 <th className="px-3 py-2">Estado</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {result.periodPrices.map((p, i) => (
-                <PeriodRow key={i} p={p} />
+              {result.periods.map((p, i) => (
+                <PeriodTableRow key={i} p={p} />
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      <LambdaResponseBlock result={result} />
 
       <BotMessage result={result} />
 
@@ -812,10 +786,10 @@ export default function Home() {
         </div>
         <h1 className="text-2xl font-bold text-brand-ink">🔍 Diagnóstico de precios — Siglo 21</h1>
         <p className="text-gray-600 mt-1">
-          Pegá el JSON de la consulta (o varios) y la herramienta ejecuta el mismo flujo que el agente IA
-          — turnos → períodos → precios — contra la API real de Siglo 21, te dice en qué paso falló y
-          por qué, y te muestra <span className="font-medium text-brand-ink">un ejemplo de lo que le
-          diría el agente IA al estudiante</span>.
+          Pegá el JSON de la consulta (o varios) y la herramienta ejecuta el mismo flujo que{" "}
+          <span className="font-mono">get-price-v4</span> — turnos → períodos → precios — contra la API real
+          de Siglo 21, te dice en qué paso falló y por qué, qué HTTP y qué output devolvería v4, y te muestra{" "}
+          <span className="font-medium text-brand-ink">un ejemplo de lo que le diría el agente IA al estudiante</span>.
         </p>
       </header>
 
@@ -912,7 +886,7 @@ export default function Home() {
       </div>
 
       <footer className="mt-10 text-xs text-gray-400 border-t border-gray-100 pt-4">
-        Réplica del flujo <span className="font-mono">get-price-v5</span> del middleware siglo21-price-proxy ·
+        Réplica del flujo <span className="font-mono">get-price-v4</span> (rama main) del middleware siglo21-price-proxy ·
         Herramienta interna de Conversia · Los resultados reflejan el estado de la API de Siglo 21 en este momento
         (una falla ocurrida durante una conversación pasada pudo haber sido temporal).
       </footer>

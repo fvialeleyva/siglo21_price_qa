@@ -1,10 +1,34 @@
-// Réplica del flujo get-price-v4/v5 del lambda siglo21-price-proxy, con fines de
-// diagnóstico: en lugar de retornar solo el precio o un error, registra cada
-// paso (URL, status HTTP, respuesta cruda, duración) para que se pueda ver
-// exactamente dónde y por qué falló la consulta contra la API de Siglo 21.
-// Para ED/EHD también replica la selección del período activo del lambda
-// (tabla hardcodeada + regla de extensión del ticket HF-0113) y marca cada
-// período como principal o alternativo, igual que lo vería el bot.
+// Réplica de get-price-v4 del lambda siglo21-price-proxy (rama
+// feat/v4-presencial-bimester, PR #22 de conversia-legacy-lambdas) con fines de
+// diagnóstico: en lugar de retornar solo el output o un error, registra cada
+// paso (URL, status HTTP, respuesta cruda, duración), qué hace v4 con cada
+// período que devuelve Siglo 21 y la respuesta exacta (HTTP + body) que daría
+// el lambda. La lógica pura (tabla de bimestres, formateador) vive en
+// ./get-price-v4.ts.
+
+import {
+  ADVISOR_MESSAGE,
+  ADVISOR_MODALITIES,
+  ALT_PERIOD_PREFIX,
+  BIMESTER_MODALITIES,
+  DEFAULT_LLM_INSTRUCTION_ERROR,
+  ED_EHD_PERIOD_ORDER,
+  ED_EHD_PERIODS,
+  MODALITY_NAMES,
+  buildCourseCoverageLine,
+  buildEdEhdPeriodKey,
+  buildPeriodCoverageLabel,
+  formatPriceResponseV4,
+  getActiveEdEhdPeriodKey,
+  round2,
+  shownEdEhdAlternatives,
+  type PriceData,
+  type PriceDataMap,
+  type PriceResponse,
+  type V4Request,
+} from "./get-price-v4";
+
+export { MODALITY_NAMES };
 
 // Configurable por env var para apuntar a otros entornos (ej. QA:
 // https://price-simulator-facade-qa.uesiglo21.edu.ar/api/v1). Default: prod.
@@ -17,11 +41,8 @@ const REQUEST_TIMEOUT_MS = 10_000; // mismo timeout que el lambda (http.Client{T
 
 // ── Tipos de entrada ──────────────────────────────────────────────────────────
 
-export interface PricingInput {
-  cau_id?: unknown;
-  modality_id?: unknown;
-  program_id?: unknown;
-}
+/** Body tal cual lo recibiría POST /v1/get-price-v4. */
+export type PricingInput = unknown;
 
 // ── Tipos de diagnóstico ──────────────────────────────────────────────────────
 
@@ -41,11 +62,8 @@ export interface StepResult {
   detail: string;
 }
 
-export interface PeriodPriceResult {
-  periodName: string;
-  subPeriod: string;
-  periodId: number;
-  subPeriodId: number;
+/** Resultado de una llamada a /precios hecha por v4. */
+export interface PriceFetchResult {
   url: string;
   ok: boolean;
   httpStatus?: number;
@@ -55,167 +73,96 @@ export interface PeriodPriceResult {
   totalDiscounts?: number;
   rawResponse?: string;
   errorDetail?: string;
-  /** Rol que le asigna el lambda (ED/EHD): principal visible o alternativo oculto */
-  role?: "primary" | "alternative";
-  /** Clave del bimestre en la tabla hardcodeada del lambda (ej: "2A/26") */
-  periodKey?: string;
-  /** Nombre legible del período según la tabla del lambda (ej: "agosto 2026") */
-  periodLabel?: string;
-  /** Meses de cursado que abarca el período según la API (ej: "agosto 2026 a octubre 2026") */
+}
+
+/**
+ * Qué hace v4 con cada período que devuelve Siglo 21 (rama bimestral):
+ * - primary / alternative / alternative_not_shown
+ * - ignored: v4 no lo cotiza (ver useLabel)
+ */
+export type PeriodUse = "primary" | "alternative" | "alternative_not_shown" | "ignored";
+
+export interface PeriodRow {
+  name: string;
+  subPeriod: string;
+  periodId: number;
+  subPeriodId: number;
+  from: string;
+  to: string;
+  /** Clave del bimestre armada como el lambda (ej: "2B/26"), si aplica */
+  key?: string;
+  /** Nombre legible según la tabla del lambda (ej: "octubre 2026") */
+  keyLabel?: string;
+  /** Meses de cursado que abarca (regla comercial fija; solo rama bimestral) */
   coverageLabel?: string;
+  use: PeriodUse;
+  /** Explicación de por qué v4 lo usa o lo ignora */
+  useLabel: string;
+  /** Llamada de precio que hizo v4 para este período (si la hizo) */
+  fetch?: PriceFetchResult;
 }
 
 export type VerdictCode =
   | "OK"
   | "OK_PARTIAL"
+  | "INVALID_REQUEST_BODY"
   | "MISSING_REQUIRED_FIELD"
-  | "PRESENCIAL_MODALITY"
+  | "ADVISOR_MODALITY"
   | "AUTH_FAILED"
   | "NO_SCHEDULES_AVAILABLE"
   | "NO_PERIODS_AVAILABLE"
-  | "PRICE_FETCH_ERROR";
+  | "NO_ACTIVE_ED_EHD_PERIOD"
+  | "PRICE_FETCH_ERROR"
+  | "UNSUPPORTED_MODALITY";
 
 export interface Verdict {
   code: VerdictCode;
-  /** Código HTTP que retornaría el lambda real en este caso */
+  /** Código HTTP que retornaría get-price-v4 en este caso */
   httpEquivalent: number;
   title: string;
   /** Explicación en lenguaje claro para el equipo de CS */
   explanation: string;
   /** A quién corresponde el problema */
-  responsible: "siglo21" | "config" | "comportamiento_esperado" | "nadie";
+  responsible: "siglo21" | "config" | "middleware" | "comportamiento_esperado" | "nadie";
+}
+
+/** Rama de v4 por la que pasa la consulta. */
+export type V4Branch = "validation" | "advisor" | "bimester" | "unsupported";
+
+/** Datos del bloque de precio que arma v4 (para el preview del mensaje del bot). */
+export interface Quote {
+  kind: "bimester";
+  periodKey: string;
+  periodName: string;
+  total: number;
+  cuota6: number;
+  cuota3: number;
+  coverageLabel: string;
+  courseCoverageLine: string;
+  /** El período cotizado no coincide con la clave activa (respaldo: primer período de la API) */
+  fallbackPeriod?: string;
+  alternatives: { key: string; name: string; total: number; cuota6: number; cuota3: number; coverageLabel: string }[];
 }
 
 export interface DiagnosisResult {
   input: { cau_id: string; modality_id: number; program_id: number };
   modalityName: string;
+  branch: V4Branch;
   verdict: Verdict;
   steps: StepResult[];
-  periodPrices: PeriodPriceResult[];
+  /** Todos los períodos que devolvió Siglo 21 y qué hizo v4 con cada uno */
+  periods: PeriodRow[];
   turnoCode?: string;
   turnoName?: string;
-  /** Clave del período activo según la tabla hardcodeada del lambda (ED/EHD) */
+  /** Clave del período activo según la tabla hardcodeada del lambda (rama bimestral) */
   primaryPeriodKey?: string;
-  /** Nombre legible del período activo (ej: "agosto 2026") */
   primaryPeriodName?: string;
+  quote?: Quote;
+  /** Respuesta exacta que daría POST /v1/get-price-v4 */
+  lambdaResponse: { httpStatus: number; body: unknown };
+  /** Instante usado como "ahora" (el lambda usa time.Now()) */
+  evaluatedAt: string;
   totalDurationMs: number;
-}
-
-// ── Mapeos (mismos que el lambda) ─────────────────────────────────────────────
-
-export const MODALITY_NAMES: Record<number, string> = {
-  1: "DISTANCIA - ED HOME [EDH]",
-  2: "DISTANCIA - EDUCACIÓN DISTRIBUIDA [ED]",
-  5: "PRESENCIAL HOME [PH - CÓRDOBA]",
-  7: "PRESENCIAL HOME RÍO IV [PH - RIVO]",
-  9: "PRESENCIAL",
-  10: "PRESENCIAL RÍO IV",
-  12: "PRESENCIAL DISTRIBUIDA [PD]",
-};
-
-const PRESENCIAL_MODALITIES = new Set([5, 9, 10, 12]);
-const ED_EHD_MODALITIES = new Set([1, 2]);
-
-// ── Selección del período activo ED/EHD ───────────────────────────────────────
-// Réplica de la tabla hardcodeada y la regla de selección del lambda
-// (pkg/services/pricing-service.go — rama fix/active-period, ticket HF-0113).
-// Mantener en sync con el lambda: al inicio de cada ciclo se AGREGAN filas nuevas
-// (las claves llevan el ciclo, ej. "1A/27"), no se reemplazan las vigentes.
-
-interface BimesterPeriodInfo {
-  fechaInicio: string; // inicio ventana de venta (dd/mm/yyyy)
-  fechaFin: string; // fin ventana de venta oficial (dd/mm/yyyy)
-  fechaExtension: string; // límite de extensión de venta (dd/mm/yyyy) — "" si no hay
-  inicioClases: string; // inicio de clases (dd/mm/yyyy)
-  nombre: string; // nombre legible (ej: "agosto 2026")
-}
-
-const ED_EHD_PERIODS: Record<string, BimesterPeriodInfo> = {
-  "1A/26": { fechaInicio: "25/08/2025", fechaFin: "15/03/2026", fechaExtension: "29/03/2026", inicioClases: "16/03/2026", nombre: "marzo 2026" },
-  "1B/26": { fechaInicio: "16/03/2026", fechaFin: "17/05/2026", fechaExtension: "31/05/2026", inicioClases: "18/05/2026", nombre: "mayo 2026" },
-  "2A/26": { fechaInicio: "18/05/2026", fechaFin: "02/08/2026", fechaExtension: "16/08/2026", inicioClases: "03/08/2026", nombre: "agosto 2026" },
-  "2B/26": { fechaInicio: "03/08/2026", fechaFin: "04/10/2026", fechaExtension: "18/10/2026", inicioClases: "05/10/2026", nombre: "octubre 2026" },
-  "1A/27": { fechaInicio: "28/07/2026", fechaFin: "14/03/2027", fechaExtension: "", inicioClases: "15/03/2027", nombre: "marzo 2027" },
-};
-
-// Orden cronológico por inicio de clases: ante un overlap gana el primero cuya
-// ventana (incluida la extensión) contiene la fecha de hoy.
-const ED_EHD_PERIOD_ORDER = ["1A/26", "1B/26", "2A/26", "2B/26", "1A/27"];
-
-function parseDdMmYyyy(value: string): number | null {
-  const m = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return null;
-  return Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
-}
-
-/** Fecha de hoy (UTC, truncada al día) — mismo criterio que el lambda. */
-function todayUtc(): number {
-  const now = new Date();
-  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-}
-
-/**
- * Período activo: el de inicio de clases más próximo cuya ventana de venta
- * —incluida la extensión— contiene la fecha de hoy. Mientras un bimestre esté
- * en extensión sigue siendo el principal aunque el siguiente ya haya abierto
- * su venta. Devuelve "" si ninguna ventana contiene la fecha.
- */
-export function getActiveEdEhdPeriodKey(today: number = todayUtc()): string {
-  for (const key of ED_EHD_PERIOD_ORDER) {
-    const info = ED_EHD_PERIODS[key];
-    const inicio = parseDdMmYyyy(info.fechaInicio);
-    const cierre = parseDdMmYyyy(info.fechaExtension || info.fechaFin);
-    if (inicio === null || cierre === null) continue;
-    if (today >= inicio && today <= cierre) return key;
-  }
-  return "";
-}
-
-/** "1/27" + "A" → "1A/27" (el ciclo es parte de la clave, igual que en el lambda). */
-export function buildEdEhdPeriodKey(periodName: string, subperiod: string): string {
-  if (!periodName || !subperiod) return "";
-  const parts = periodName.split("/");
-  if (parts.length !== 2 || !parts[0] || !parts[1]) return "";
-  return `${parts[0]}${subperiod}/${parts[1]}`;
-}
-
-const SPANISH_MONTHS = [
-  "enero", "febrero", "marzo", "abril", "mayo", "junio",
-  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
-];
-
-function monthYearLabel(isoDate?: string): string {
-  if (!isoDate) return "";
-  const m = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return "";
-  return `${SPANISH_MONTHS[Number(m[2]) - 1]} ${m[1]}`;
-}
-
-// Meses de cursado que cubre el arancel de cada bimestre — regla comercial fija
-// de Siglo 21 (el arancel de los períodos A incluye ambos bimestres del
-// cuatrimestre). Igual que el lambda (edEhdCoverageMonths).
-const COVERAGE_MONTHS: Record<string, [string, string]> = {
-  "1A": ["marzo", "julio"],
-  "1B": ["mayo", "julio"],
-  "2A": ["agosto", "diciembre"],
-  "2B": ["octubre", "diciembre"],
-};
-
-/**
- * "2B/26" → "octubre 2026 a diciembre 2026" (regla comercial fija, año del
- * ciclo). Si la clave no es reconocible, cae a las fechas de cursado de la API.
- */
-function coverageLabel(periodKey: string, from?: string, to?: string): string {
-  const months = COVERAGE_MONTHS[periodKey.slice(0, 2)];
-  const cycle = periodKey.split("/")[1];
-  if (months && cycle && /^\d{2}$/.test(cycle)) {
-    const year = 2000 + Number(cycle);
-    return `${months[0]} ${year} a ${months[1]} ${year}`;
-  }
-  const start = monthYearLabel(from);
-  const end = monthYearLabel(to);
-  if (!start || !end) return "";
-  return `${start} a ${end}`;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -246,12 +193,7 @@ async function timedFetch(url: string, token: string): Promise<FetchOutcome> {
       cache: "no-store",
     });
     const body = await res.text();
-    return {
-      ok: res.ok,
-      httpStatus: res.status,
-      body,
-      durationMs: Date.now() - start,
-    };
+    return { ok: res.status === 200, httpStatus: res.status, body, durationMs: Date.now() - start };
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "TimeoutError";
     return {
@@ -270,6 +212,138 @@ function describeHttpFailure(outcome: FetchOutcome): string {
   return `La API de Siglo 21 respondió con HTTP ${outcome.httpStatus}${
     outcome.body ? ` — respuesta: ${truncate(outcome.body, 300)}` : " (sin cuerpo de respuesta)"
   }`;
+}
+
+const money = (n: number) => `$${n.toFixed(2)}`;
+
+// ── Decodificación estilo encoding/json de Go ─────────────────────────────────
+// El lambda decodifica en structs tipados: un campo con tipo incorrecto hace
+// fallar todo el decode (→ error). Replicamos esos chequeos de tipo.
+
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+const isNil = (v: unknown) => v === undefined || v === null;
+
+class DecodeError extends Error {}
+
+function goString(o: Obj, field: string): string {
+  const v = o[field];
+  if (isNil(v)) return "";
+  if (typeof v !== "string") throw new DecodeError(`"${field}" debería ser texto y vino ${JSON.stringify(v)}`);
+  return v;
+}
+
+function goInt(o: Obj, field: string): number {
+  const v = o[field];
+  if (isNil(v)) return 0;
+  if (typeof v !== "number" || !Number.isInteger(v)) throw new DecodeError(`"${field}" debería ser un entero y vino ${JSON.stringify(v)}`);
+  return v;
+}
+
+function goFloat(o: Obj, field: string): number {
+  const v = o[field];
+  if (isNil(v)) return 0;
+  if (typeof v !== "number") throw new DecodeError(`"${field}" debería ser un número y vino ${JSON.stringify(v)}`);
+  return v;
+}
+
+function goObj(v: unknown, what: string): Obj {
+  if (isNil(v)) return {};
+  if (!isObj(v)) throw new DecodeError(`${what} debería ser un objeto`);
+  return v;
+}
+
+function goArray(v: unknown, what: string): unknown[] {
+  if (isNil(v)) return [];
+  if (!Array.isArray(v)) throw new DecodeError(`${what} debería ser una lista`);
+  return v;
+}
+
+function parseJson(body: string): unknown {
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new DecodeError("la respuesta no es JSON válido");
+  }
+}
+
+interface ScheduleItem {
+  id: number;
+  code: string;
+  name: string;
+}
+
+function decodeSchedules(body: string): ScheduleItem[] {
+  const root = goObj(parseJson(body), "la respuesta");
+  return goArray(root.items, '"items"').map((it) => {
+    const o = goObj(it, "cada turno");
+    return { id: goInt(o, "id"), code: goString(o, "code"), name: goString(o, "name") };
+  });
+}
+
+interface PeriodItem {
+  subPeriodId: number;
+  periodId: number;
+  startDate: string;
+  endDate: string;
+  subPeriod: string;
+  name: string;
+}
+
+function decodePeriods(body: string): PeriodItem[] {
+  const root = goObj(parseJson(body), "la respuesta");
+  return goArray(root.items, '"items"').map((it) => {
+    const o = goObj(it, "cada período");
+    const p = goObj(o.period, '"period"');
+    goInt(p, "id");
+    for (const f of ["name", "description", "from", "to", "salesFrom", "salesTo", "usePkg"]) goString(p, f);
+    goString(o, "description");
+    return {
+      subPeriodId: goInt(o, "id"),
+      periodId: goInt(p, "id"),
+      startDate: goString(o, "from"),
+      endDate: goString(o, "to"),
+      subPeriod: goString(o, "subperiod"),
+      name: goString(o, "name"),
+    };
+  });
+}
+
+function decodePrice(body: string): PriceResponse {
+  const root = goObj(parseJson(body), "la respuesta");
+  goString(root, "requestId");
+  return {
+    total: goFloat(root, "total"),
+    totalPrecioLista: goFloat(root, "totalPrecioLista"),
+    totalDescuentos: goFloat(root, "totalDescuentos"),
+    items: goArray(root.items, '"items"').map((it) => {
+      const o = goObj(it, "cada ítem");
+      return {
+        nombre: goString(o, "nombre"),
+        precioLista: goFloat(o, "precioLista"),
+        descuentos: goArray(o.descuentos, '"descuentos"').map((d) => {
+          const dd = goObj(d, "cada descuento");
+          return { motivo: goString(dd, "motivo"), porcentaje: goFloat(dd, "porcentaje"), monto: goFloat(dd, "monto") };
+        }),
+      };
+    }),
+  };
+}
+
+/** models.IntOrString: número (se trunca a int) o string numérico (strconv.Atoi). */
+function decodeIntOrString(o: Obj, field: string): number {
+  const v = o[field];
+  if (v === undefined) return 0;
+  if (typeof v === "number") return Math.trunc(v);
+  if (typeof v === "string" && /^[+-]?\d+$/.test(v)) return Number(v);
+  throw new DecodeError(`"${field}" debe ser número o string numérico, vino ${JSON.stringify(v)}`);
+}
+
+function decodeOptionalBool(o: Obj, field: string): boolean | undefined {
+  const v = o[field];
+  if (isNil(v)) return undefined;
+  if (typeof v !== "boolean") throw new DecodeError(`"${field}" debe ser true/false, vino ${JSON.stringify(v)}`);
+  return v;
 }
 
 // ── Token (mismo flujo que el lambda: client_credentials contra auth.ues21) ───
@@ -298,7 +372,7 @@ async function fetchToken(creds: Siglo21Credentials): Promise<TokenOutcome> {
     scope: "conversia:read",
   });
 
-  let outcome: { status?: number; body: string; networkError?: string };
+  let outcome: { status?: number; body: string };
   try {
     const res = await fetch(AUTH_URL, {
       method: "POST",
@@ -380,98 +454,169 @@ async function fetchToken(creds: Siglo21Credentials): Promise<TokenOutcome> {
 
 // ── Diagnóstico principal ─────────────────────────────────────────────────────
 
-export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Promise<DiagnosisResult> {
+export interface DiagnoseOptions {
+  /** Instante a usar como "ahora". Solo para tests; en producción se omite (= new Date()). */
+  now?: Date;
+}
+
+export async function diagnose(
+  raw: PricingInput,
+  creds: Siglo21Credentials,
+  options: DiagnoseOptions = {}
+): Promise<DiagnosisResult> {
+  const now = options.now ?? new Date();
   const startedAt = Date.now();
   const steps: StepResult[] = [];
-  const periodPrices: PeriodPriceResult[] = [];
-  const primarySel: { key?: string; name?: string } = {};
+  const periods: PeriodRow[] = [];
+  const extra: Partial<DiagnosisResult> = {};
+  let branch: V4Branch = "validation";
+  let input: DiagnosisResult["input"] = { cau_id: "—", modality_id: 0, program_id: 0 };
+  let llmInstructionError = DEFAULT_LLM_INSTRUCTION_ERROR;
 
-  const finish = (
-    verdict: Verdict,
-    input: DiagnosisResult["input"],
-    extra?: Partial<DiagnosisResult>
-  ): DiagnosisResult => ({
+  const finish = (verdict: Verdict, lambdaResponse: DiagnosisResult["lambdaResponse"]): DiagnosisResult => ({
     input,
-    modalityName: MODALITY_NAMES[input.modality_id] ?? `Modalidad ${input.modality_id} (desconocida)`,
+    modalityName: MODALITY_NAMES[input.modality_id] ?? `Modalidad ${input.modality_id} (sin mapeo en v4)`,
+    branch,
     verdict,
     steps,
-    periodPrices,
-    primaryPeriodKey: primarySel.key,
-    primaryPeriodName: primarySel.name,
-    totalDurationMs: Date.now() - startedAt,
+    periods,
     ...extra,
+    lambdaResponse,
+    evaluatedAt: now.toISOString(),
+    totalDurationMs: Date.now() - startedAt,
   });
 
-  // ── Paso 1: Validación de campos (igual que validatePricingRequestV4) ──────
-  const missing: string[] = [];
-  const cauId = typeof raw.cau_id === "string" ? raw.cau_id.trim() : "";
-  const modalityId = typeof raw.modality_id === "number" ? raw.modality_id : NaN;
-  const programId = typeof raw.program_id === "number" ? raw.program_id : NaN;
+  const validationError = (message: string) => ({
+    httpStatus: 400,
+    body: { error: { code: "COMMON_INVALID_REQUEST", type: "VALIDATION", message } },
+  });
+  const authError = () => ({
+    httpStatus: 401,
+    body: { error: { code: "COMMON_UNAUTHORIZED", type: "AUTHORIZATION", message: "Authentication failed" } },
+  });
+  const businessError = (httpStatus: 404 | 500) => ({ httpStatus, body: { error: llmInstructionError } });
 
-  if (!cauId) missing.push("cau_id");
-  if (!Number.isFinite(modalityId)) missing.push("modality_id");
-  if (!Number.isFinite(programId)) missing.push("program_id");
-
-  const input = {
-    cau_id: cauId || String(raw.cau_id ?? "—"),
-    modality_id: Number.isFinite(modalityId) ? modalityId : 0,
-    program_id: Number.isFinite(programId) ? programId : 0,
-  };
-
-  if (missing.length > 0) {
+  // ── Paso 1: decodificar el body (json.Unmarshal en models.PricingRequest) ──
+  let req: V4Request;
+  let rawObj: Obj;
+  try {
+    if (!isObj(raw)) throw new DecodeError("el body debe ser un objeto JSON");
+    rawObj = raw;
+    req = {
+      programId: decodeIntOrString(raw, "program_id"),
+      modalityId: decodeIntOrString(raw, "modality_id"),
+      cauId: goString(raw, "cau_id"),
+      llmInstruction: goString(raw, "llm_instruction"),
+      llmInstructionError: goString(raw, "llm_instruction_error"),
+      includePaymentMethods: decodeOptionalBool(raw, "include_payment_methods"),
+      customPaymentMethodsInfo: goString(raw, "custom_payment_methods_info"),
+      includeRestrictions: decodeOptionalBool(raw, "include_restrictions"),
+      customRestrictions: goString(raw, "custom_restrictions"),
+    };
+    decodeIntOrString(raw, "schedule_id");
+    goString(raw, "date");
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    if (isObj(raw)) {
+      input = {
+        cau_id: typeof raw.cau_id === "string" ? raw.cau_id : String(raw.cau_id ?? "—"),
+        modality_id: typeof raw.modality_id === "number" ? raw.modality_id : 0,
+        program_id: typeof raw.program_id === "number" ? raw.program_id : 0,
+      };
+    }
     steps.push({
       id: "validation",
       title: "Validación del request",
       status: "fail",
-      detail: `Faltan o son inválidos los campos: ${missing.join(", ")}. El JSON debe tener cau_id (texto), modality_id (número) y program_id (número).`,
+      detail: `El lambda no puede leer el body (${why}). Responde 400 "Invalid request body".`,
+    });
+    return finish(
+      {
+        code: "INVALID_REQUEST_BODY",
+        httpEquivalent: 400,
+        title: "El request tiene un formato inválido",
+        explanation: `get-price-v4 rechaza el body antes de consultar nada: ${why}. No es un error de Siglo 21 — hay que corregir los datos que envía la tool.`,
+        responsible: "config",
+      },
+      validationError("Invalid request body")
+    );
+  }
+
+  if (req.llmInstructionError !== "") llmInstructionError = req.llmInstructionError;
+  input = { cau_id: req.cauId || "—", modality_id: req.modalityId, program_id: req.programId };
+
+  // validatePricingRequestV4: devuelve el PRIMER campo faltante, en este orden.
+  const missing =
+    req.programId === 0 ? "program_id" : req.modalityId === 0 ? "modality_id" : req.cauId === "" ? "cau_id" : "";
+  if (missing) {
+    steps.push({
+      id: "validation",
+      title: "Validación del request",
+      status: "fail",
+      detail: `Falta ${missing} (o vino en 0 / vacío). get-price-v4 exige program_id, modality_id y cau_id; schedule_id no se usa.`,
     });
     return finish(
       {
         code: "MISSING_REQUIRED_FIELD",
         httpEquivalent: 400,
         title: "El request está incompleto",
-        explanation: `El JSON enviado no tiene todos los campos obligatorios (falta o es inválido: ${missing.join(", ")}). Esto NO es un error de Siglo 21 — hay que corregir los datos que se envían.`,
+        explanation: `El JSON no trae ${missing} (el lambda responde 400 "${missing} is required"). Esto NO es un error de Siglo 21 — hay que corregir los datos que se envían.`,
         responsible: "config",
       },
-      input
+      validationError(`${missing} is required`)
     );
   }
 
+  const ignoredFields = ["schedule_id", "date"].filter((f) => rawObj[f] !== undefined);
   steps.push({
     id: "validation",
     title: "Validación del request",
     status: "ok",
-    detail: `Campos completos: carrera ${programId}, modalidad ${modalityId}, CAU ${cauId}.`,
+    detail: `Campos completos: carrera ${req.programId}, modalidad ${req.modalityId}, CAU ${req.cauId} (se usa tal cual, sin overrides).${
+      ignoredFields.length ? ` ${ignoredFields.join(" y ")} vino en el request pero v4 no lo usa.` : ""
+    }`,
   });
 
-  // ── Paso 2: Chequeo de modalidad presencial ────────────────────────────────
-  if (PRESENCIAL_MODALITIES.has(modalityId)) {
+  const { programId, modalityId, cauId } = req;
+  const modalityName = MODALITY_NAMES[modalityId] ?? "sin mapeo en v4";
+
+  // ── Paso 2: modalidades que derivan a asesor (9, 10, 12) ───────────────────
+  if (ADVISOR_MODALITIES.has(modalityId)) {
+    branch = "advisor";
+    const output = req.llmInstruction !== "" ? req.llmInstruction : ADVISOR_MESSAGE;
     steps.push({
       id: "modality-check",
       title: "Chequeo de modalidad",
-      status: "fail",
-      detail: `La modalidad ${modalityId} (${MODALITY_NAMES[modalityId]}) es presencial. El middleware NO consulta precios para modalidades presenciales: devuelve error 422 a propósito.`,
+      status: "ok",
+      detail: `La modalidad ${modalityId} (${modalityName}) deriva a asesor en v4: responde 200 sin pedir token ni consultar a Siglo 21${
+        req.llmInstruction !== "" ? " (el output es el llm_instruction del request, que reemplaza el mensaje por defecto)" : ""
+      }.`,
     });
     return finish(
       {
-        code: "PRESENCIAL_MODALITY",
-        httpEquivalent: 422,
-        title: "Modalidad presencial — comportamiento esperado",
-        explanation: `La modalidad ${modalityId} (${MODALITY_NAMES[modalityId]}) es presencial y por diseño NO tiene precio online: el agente IA debe derivar al estudiante a un asesor de Admisión. Esto no es una falla — es el comportamiento configurado. No hay nada que reportar a Siglo 21.`,
+        code: "ADVISOR_MODALITY",
+        httpEquivalent: 200,
+        title: "Deriva a asesor — comportamiento esperado",
+        explanation: `La modalidad ${modalityId} (${modalityName}) no cotiza en get-price-v4: el lambda responde 200 con la instrucción de derivar al estudiante a un asesor de Admisión, sin consultar a Siglo 21. No es una falla y no hay nada que reportar.`,
         responsible: "comportamiento_esperado",
       },
-      input
+      { httpStatus: 200, body: { output } }
     );
   }
+
+  branch = BIMESTER_MODALITIES.has(modalityId) ? "bimester" : "unsupported";
 
   steps.push({
     id: "modality-check",
     title: "Chequeo de modalidad",
-    status: "ok",
-    detail: `Modalidad ${modalityId} (${MODALITY_NAMES[modalityId] ?? "desconocida"}) — habilitada para consulta de precios online.`,
+    status: branch === "unsupported" ? "warning" : "ok",
+    detail:
+      branch === "bimester"
+        ? `Modalidad ${modalityId} (${modalityName}) — rama bimestral (1, 2, 3, 4, 5, 7): período activo por tabla hardcodeada + alternativos ocultos.`
+        : `La modalidad ${modalityId} (${modalityName}) no tiene lógica de precio en v4. El lambda NO la rechaza: igual pide token, turnos y períodos, y termina en 500.`,
   });
 
-  // ── Paso 3: Token (igual que el lambda: client_credentials en cada consulta) ──
+  // ── Paso 3: Token ──────────────────────────────────────────────────────────
   if (!creds.clientId || !creds.clientSecret) {
     steps.push({
       id: "auth",
@@ -487,12 +632,11 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
         explanation: "Esta herramienta de QA no tiene configuradas las credenciales de Siglo 21 (env vars SIGLO21_CLIENT_ID y SIGLO21_CLIENT_SECRET). Avisale a Diego para que las configure en Vercel.",
         responsible: "config",
       },
-      input
+      authError()
     );
   }
 
   const tokenOutcome = await fetchToken(creds);
-
   if (!tokenOutcome.token) {
     steps.push({
       id: "auth",
@@ -510,13 +654,12 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
         code: "AUTH_FAILED",
         httpEquivalent: 401,
         title: "No se pudo obtener el token de autenticación de Siglo 21",
-        explanation: `El servidor de autenticación de Siglo 21 (auth.ues21.edu.ar) no entregó un token válido: ${tokenOutcome.errorDetail}. Sin token no se puede consultar ningún precio — este es el mismo error AUTH_FAILED que devuelve el middleware. Suele ser un problema temporal del lado de Siglo 21; si persiste, reportarles adjuntando el detalle técnico.`,
+        explanation: `El servidor de autenticación de Siglo 21 (auth.ues21.edu.ar) no entregó un token válido: ${tokenOutcome.errorDetail}. get-price-v4 responde 401 "Authentication failed". Suele ser temporal del lado de Siglo 21; si persiste, reportarles adjuntando el detalle técnico.`,
         responsible: "siglo21",
       },
-      input
+      authError()
     );
   }
-
   const token = tokenOutcome.token;
   steps.push({
     id: "auth",
@@ -527,31 +670,28 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
     httpStatus: tokenOutcome.httpStatus,
     durationMs: tokenOutcome.durationMs,
     rawResponse: tokenOutcome.rawResponse,
-    detail: `Token obtenido correctamente de Siglo 21 (igual que hace el middleware en cada consulta)${
+    detail: `Token obtenido correctamente (igual que el lambda en cada consulta)${
       tokenOutcome.expiresIn ? ` — expira en ${tokenOutcome.expiresIn} segundos` : ""
     }.`,
   });
 
-  // ── Paso 4: Turnos de cursado ──────────────────────────────────────────────
+  // ── Paso 4: Turnos de cursado (se toma el PRIMER ítem) ─────────────────────
   const turnosUrl = `${BASE_URL}/variables/turnos-cursado/carrera/${programId}/modalidad/${modalityId}/cau/${encodeURIComponent(cauId)}`;
   const turnosOutcome = await timedFetch(turnosUrl, token);
-
-  let schedules: Array<{ id: number; code: string; name: string }> = [];
-  let turnosParseError: string | undefined;
-
-  if (turnosOutcome.ok) {
+  let schedules: ScheduleItem[] = [];
+  let turnosError: string | undefined;
+  if (!turnosOutcome.ok) {
+    turnosError = describeHttpFailure(turnosOutcome);
+  } else {
     try {
-      const parsed = JSON.parse(turnosOutcome.body);
-      schedules = Array.isArray(parsed?.items) ? parsed.items : [];
-    } catch {
-      turnosParseError = "La API respondió 200 pero el cuerpo no es JSON válido.";
+      schedules = decodeSchedules(turnosOutcome.body);
+      if (schedules.length === 0) turnosError = "La API respondió HTTP 200 pero la lista de turnos vino VACÍA.";
+    } catch (err) {
+      turnosError = `La API respondió HTTP 200 pero el lambda no puede leerla: ${err instanceof Error ? err.message : String(err)}.`;
     }
   }
 
-  if (!turnosOutcome.ok || turnosParseError || schedules.length === 0) {
-    const reason = !turnosOutcome.ok
-      ? describeHttpFailure(turnosOutcome)
-      : turnosParseError ?? "La API respondió correctamente (HTTP 200) pero la lista de turnos vino VACÍA.";
+  if (turnosError) {
     steps.push({
       id: "turnos",
       title: "1/3 — Turnos de cursado",
@@ -561,30 +701,30 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
       httpStatus: turnosOutcome.httpStatus,
       durationMs: turnosOutcome.durationMs,
       rawResponse: truncate(turnosOutcome.body),
-      detail: reason,
+      detail: turnosError,
     });
-
-    const isAuthProblem = turnosOutcome.httpStatus === 401 || turnosOutcome.httpStatus === 403;
+    const tokenRejected = turnosOutcome.httpStatus === 401 || turnosOutcome.httpStatus === 403;
+    const emptyList = turnosOutcome.ok && schedules.length === 0 && turnosError.includes("VACÍA");
     return finish(
       {
-        code: isAuthProblem ? "AUTH_FAILED" : "NO_SCHEDULES_AVAILABLE",
-        httpEquivalent: isAuthProblem ? 401 : 404,
-        title: isAuthProblem
-          ? "Siglo 21 rechazó el token de autenticación"
-          : "No hay turnos de cursado disponibles",
-        explanation: isAuthProblem
-          ? `Siglo 21 rechazó el token recién emitido (HTTP ${turnosOutcome.httpStatus}) al consultar los turnos. Es una inconsistencia entre su servidor de autenticación y su API de precios. Reportar a Siglo 21 adjuntando el detalle técnico.`
-          : schedules.length === 0 && turnosOutcome.ok
-            ? `Siglo 21 no tiene turnos de cursado cargados para la carrera ${programId} en modalidad ${modalityId} con el CAU ${cauId}. Puede ser que la combinación carrera/modalidad/CAU no exista o no esté configurada del lado de Siglo 21. Verificar primero que los datos sean correctos; si lo son, reportar a Siglo 21.`
-            : `La consulta de turnos a Siglo 21 falló: ${reason}. Este es el primer paso de la consulta de precio, así que el agente IA no pudo dar precio. Reportar a Siglo 21 con el detalle técnico.`,
-        responsible: isAuthProblem || !turnosOutcome.ok ? "siglo21" : "config",
+        code: "NO_SCHEDULES_AVAILABLE",
+        httpEquivalent: 404,
+        title: tokenRejected ? "Siglo 21 rechazó el token al pedir turnos" : "No hay turnos de cursado disponibles",
+        explanation: tokenRejected
+          ? `Siglo 21 rechazó el token recién emitido (HTTP ${turnosOutcome.httpStatus}) al consultar turnos. get-price-v4 no distingue este caso: responde 404 con la instrucción de error (el bot deriva a Admisión). Reportar a Siglo 21 adjuntando el detalle técnico.`
+          : emptyList
+            ? `Siglo 21 no tiene turnos cargados para la carrera ${programId}, modalidad ${modalityId}, CAU ${cauId}. get-price-v4 responde 404 y el bot deriva a Admisión. Verificar que la combinación carrera/modalidad/CAU sea correcta; si lo es, reportar a Siglo 21.`
+            : `La consulta de turnos falló: ${turnosError} get-price-v4 responde 404 y el bot deriva a Admisión. Reportar a Siglo 21 con el detalle técnico.`,
+        responsible: emptyList ? "config" : "siglo21",
       },
-      input
+      businessError(404)
     );
   }
 
   const turnoCode = schedules[0].code;
   const turnoName = schedules[0].name;
+  extra.turnoCode = turnoCode;
+  extra.turnoName = turnoName;
   steps.push({
     id: "turnos",
     title: "1/3 — Turnos de cursado",
@@ -594,37 +734,26 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
     httpStatus: turnosOutcome.httpStatus,
     durationMs: turnosOutcome.durationMs,
     rawResponse: truncate(turnosOutcome.body),
-    detail: `Siglo 21 devolvió ${schedules.length} turno(s). Se usa el primero: "${turnoName}" (código ${turnoCode}) — igual que el middleware.`,
+    detail: `Siglo 21 devolvió ${schedules.length} turno(s). v4 usa el PRIMERO: "${turnoName}" (código ${turnoCode}).`,
   });
 
-  // ── Paso 5: Períodos ───────────────────────────────────────────────────────
+  // ── Paso 5: Períodos del turno ─────────────────────────────────────────────
   const periodosUrl = `${BASE_URL}/variables/periodos/carrera/${programId}/modalidad/${modalityId}/cau/${encodeURIComponent(cauId)}/turno/${encodeURIComponent(turnoCode)}`;
   const periodosOutcome = await timedFetch(periodosUrl, token);
-
-  interface RawPeriodItem {
-    id: number;
-    period?: { id: number; name?: string };
-    subperiod?: string;
-    name?: string;
-    from?: string;
-    to?: string;
-  }
-  let periodItems: RawPeriodItem[] = [];
-  let periodosParseError: string | undefined;
-
-  if (periodosOutcome.ok) {
+  let apiPeriods: PeriodItem[] = [];
+  let periodosError: string | undefined;
+  if (!periodosOutcome.ok) {
+    periodosError = describeHttpFailure(periodosOutcome);
+  } else {
     try {
-      const parsed = JSON.parse(periodosOutcome.body);
-      periodItems = Array.isArray(parsed?.items) ? parsed.items : [];
-    } catch {
-      periodosParseError = "La API respondió 200 pero el cuerpo no es JSON válido.";
+      apiPeriods = decodePeriods(periodosOutcome.body);
+      if (apiPeriods.length === 0) periodosError = "La API respondió HTTP 200 pero la lista de períodos vino VACÍA.";
+    } catch (err) {
+      periodosError = `La API respondió HTTP 200 pero el lambda no puede leerla: ${err instanceof Error ? err.message : String(err)}.`;
     }
   }
 
-  if (!periodosOutcome.ok || periodosParseError || periodItems.length === 0) {
-    const reason = !periodosOutcome.ok
-      ? describeHttpFailure(periodosOutcome)
-      : periodosParseError ?? "La API respondió correctamente (HTTP 200) pero la lista de períodos vino VACÍA.";
+  if (periodosError) {
     steps.push({
       id: "periodos",
       title: "2/3 — Períodos del turno",
@@ -634,21 +763,20 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
       httpStatus: periodosOutcome.httpStatus,
       durationMs: periodosOutcome.durationMs,
       rawResponse: truncate(periodosOutcome.body),
-      detail: reason,
+      detail: periodosError,
     });
     return finish(
       {
         code: "NO_PERIODS_AVAILABLE",
         httpEquivalent: 404,
-        title: "El turno no tiene períodos activos",
+        title: "El turno no tiene períodos",
         explanation:
-          periodItems.length === 0 && periodosOutcome.ok
-            ? `Siglo 21 encontró el turno "${turnoName}" pero NO tiene períodos de cursado activos para esta carrera. Normalmente significa que la inscripción está cerrada para este ciclo, o que falta configurar los períodos del lado de Siglo 21. Reportar a Siglo 21 si debería haber inscripción abierta.`
-            : `La consulta de períodos a Siglo 21 falló: ${reason}. Reportar a Siglo 21 con el detalle técnico.`,
+          periodosOutcome.ok && apiPeriods.length === 0
+            ? `Siglo 21 encontró el turno "${turnoName}" pero NO devolvió períodos. get-price-v4 responde 404 y el bot deriva a Admisión. Suele significar inscripción cerrada o períodos sin configurar del lado de Siglo 21.`
+            : `La consulta de períodos falló: ${periodosError} get-price-v4 responde 404 y el bot deriva a Admisión. Reportar a Siglo 21 con el detalle técnico.`,
         responsible: "siglo21",
       },
-      input,
-      { turnoCode, turnoName }
+      businessError(404)
     );
   }
 
@@ -661,185 +789,234 @@ export async function diagnose(raw: PricingInput, creds: Siglo21Credentials): Pr
     httpStatus: periodosOutcome.httpStatus,
     durationMs: periodosOutcome.durationMs,
     rawResponse: truncate(periodosOutcome.body),
-    detail: `Siglo 21 devolvió ${periodItems.length} período(s): ${periodItems
-      .map((p) => `${p.name ?? p.period?.name ?? "?"}-${p.subperiod ?? "?"}`)
-      .join(", ")}.`,
+    detail: `Siglo 21 devolvió ${apiPeriods.length} período(s): ${apiPeriods.map((p) => `${p.name || "?"}-${p.subPeriod || "?"}`).join(", ")}.`,
   });
 
-  // ── Paso 5b: Selección del período activo (ED/EHD, igual que el lambda) ────
-  // El lambda elige UN período principal con su tabla hardcodeada (regla del
-  // ticket HF-0113: gana el de inicio de clases más próximo cuya ventana de
-  // venta —incluida la extensión— contiene la fecha de hoy). El resto queda
-  // como alternativos ocultos que el bot solo ofrece si rechazan el principal.
-  let primaryItemId: number | undefined;
-  if (ED_EHD_MODALITIES.has(modalityId)) {
-    const itemKey = (i: RawPeriodItem) =>
-      buildEdEhdPeriodKey(i.name ?? i.period?.name ?? "", i.subperiod ?? "");
-    const activeKey = getActiveEdEhdPeriodKey();
-    const match = activeKey ? periodItems.find((i) => itemKey(i) === activeKey) : undefined;
-    const activeInfo = activeKey ? ED_EHD_PERIODS[activeKey] : undefined;
-
-    if (match) {
-      primaryItemId = match.id;
-      primarySel.key = activeKey;
-      primarySel.name = activeInfo?.nombre;
-      steps.push({
-        id: "periodo-activo",
-        title: "Selección del período activo (tabla del middleware)",
-        status: "ok",
-        detail: `Período activo según la tabla hardcodeada: ${activeKey} (${activeInfo?.nombre ?? "?"}), ventana de venta ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""}. Ese es el precio que ve el estudiante; los demás períodos quedan como alternativos ocultos.`,
-      });
-    } else if (activeKey) {
-      // Mismo fallback que el lambda: sin match exacto usa el primer item de la API.
-      primaryItemId = periodItems[0]?.id;
-      primarySel.key = activeKey;
-      primarySel.name = activeInfo?.nombre;
-      steps.push({
-        id: "periodo-activo",
-        title: "Selección del período activo (tabla del middleware)",
-        status: "warning",
-        detail: `La tabla hardcodeada indica que el activo es ${activeKey} (${activeInfo?.nombre ?? "?"}), pero Siglo 21 NO devolvió ese período. El middleware usa como respaldo el primer período de la lista (${periodItems[0] ? `${periodItems[0].name ?? "?"}-${periodItems[0].subperiod ?? "?"}` : "—"}). Verificar si la tabla del middleware está desactualizada o si falta el período del lado de Siglo 21.`,
-      });
-    } else {
-      steps.push({
-        id: "periodo-activo",
-        title: "Selección del período activo (tabla del middleware)",
-        status: "warning",
-        detail: "Ninguna ventana de venta de la tabla hardcodeada del middleware contiene la fecha de hoy: el middleware respondería con derivación a Admisión (sin precio). Hay que cargar las fechas del ciclo nuevo en la tabla.",
-      });
-    }
+  // Una fila por período de la API; el uso se completa según la rama.
+  for (const p of apiPeriods) {
+    periods.push({
+      name: p.name,
+      subPeriod: p.subPeriod,
+      periodId: p.periodId,
+      subPeriodId: p.subPeriodId,
+      from: p.startDate,
+      to: p.endDate,
+      use: "ignored",
+      useLabel: "v4 no lo cotiza",
+    });
   }
 
-  // ── Paso 6: Precios por período (secuencial, igual que el lambda) ──────────
-  for (const item of periodItems) {
-    const periodId = item.period?.id ?? 0;
-    const subPeriodId = item.id;
-    const subPeriod = item.subperiod ?? "";
-    const periodName = item.name ?? item.period?.name ?? "?";
-    const periodKey = ED_EHD_MODALITIES.has(modalityId)
-      ? buildEdEhdPeriodKey(periodName, subPeriod)
-      : "";
-    const roleFields: Pick<PeriodPriceResult, "role" | "periodKey" | "periodLabel" | "coverageLabel"> = {
-      role:
-        primaryItemId === undefined
-          ? undefined
-          : item.id === primaryItemId
-            ? "primary"
-            : "alternative",
-      periodKey: periodKey || undefined,
-      periodLabel: (periodKey && ED_EHD_PERIODS[periodKey]?.nombre) || undefined,
-      coverageLabel: coverageLabel(periodKey, item.from, item.to) || undefined,
+  /** Llamada de precio de v4 (secuencial, con el turnoCode descubierto). */
+  const fetchPrice = async (idx: number): Promise<PriceData | null> => {
+    const p = apiPeriods[idx];
+    const url = `${BASE_URL}/precios/carrera/${programId}/modalidad/${modalityId}/cau/${encodeURIComponent(cauId)}/turno/${encodeURIComponent(turnoCode)}/periodo/${p.periodId}/subperiodo/${p.subPeriodId}/codigo/${encodeURIComponent(p.subPeriod)}`;
+    const outcome = await timedFetch(url, token);
+    let price: PriceResponse | undefined;
+    let errorDetail: string | undefined;
+    if (!outcome.ok) {
+      errorDetail = describeHttpFailure(outcome);
+    } else {
+      try {
+        price = decodePrice(outcome.body);
+      } catch (err) {
+        errorDetail = `Respondió HTTP 200 pero el lambda no puede leerla: ${err instanceof Error ? err.message : String(err)}.`;
+      }
+    }
+    periods[idx].fetch = {
+      url,
+      ok: Boolean(price),
+      httpStatus: outcome.httpStatus,
+      durationMs: outcome.durationMs,
+      total: price?.total,
+      totalListPrice: price?.totalPrecioLista,
+      totalDiscounts: price?.totalDescuentos,
+      rawResponse: truncate(outcome.body),
+      errorDetail,
+    };
+    if (!price) return null;
+    return { periodName: p.name, subPeriod: p.subPeriod, startDate: p.startDate, endDate: p.endDate, price };
+  };
+
+  const priceData: PriceDataMap = {};
+  let partialFailures = 0;
+
+  // ── Paso 6: Rama bimestral (1, 2, 3, 4, 5, 7) ──────────────────────────────
+  if (branch === "bimester") {
+    const activeKey = getActiveEdEhdPeriodKey(now);
+    for (const row of periods) {
+      const key = buildEdEhdPeriodKey(row.name, row.subPeriod);
+      if (key) {
+        row.key = key;
+        row.keyLabel = ED_EHD_PERIODS[key]?.nombre;
+        row.coverageLabel = buildPeriodCoverageLabel(key, { startDate: row.from, endDate: row.to }) || undefined;
+      }
+    }
+
+    if (!activeKey) {
+      steps.push({
+        id: "periodo-activo",
+        title: "Selección del período activo (tabla del lambda)",
+        status: "fail",
+        detail: `Ninguna ventana de venta de la tabla hardcodeada contiene el día UTC ${now.toISOString().slice(0, 10)}. El lambda corta acá con 500 (no consulta precios).`,
+      });
+      return finish(
+        {
+          code: "NO_ACTIVE_ED_EHD_PERIOD",
+          httpEquivalent: 500,
+          title: "La tabla de períodos bimestrales del lambda no cubre la fecha de hoy",
+          explanation: `get-price-v4 busca el período activo en su tabla hardcodeada (${ED_EHD_PERIOD_ORDER.join(", ")}) y hoy no cae en ninguna ventana de venta. Responde 500 y el bot deriva a Admisión. Hay que cargar las fechas del ciclo nuevo en el lambda — no es un problema de Siglo 21.`,
+          responsible: "middleware",
+        },
+        businessError(500)
+      );
+    }
+
+    const activeInfo = ED_EHD_PERIODS[activeKey];
+    extra.primaryPeriodKey = activeKey;
+    extra.primaryPeriodName = activeInfo?.nombre;
+
+    let primaryIdx = periods.findIndex((r) => r.key === activeKey);
+    const isFallback = primaryIdx === -1;
+    if (isFallback) primaryIdx = 0;
+    const primaryRow = periods[primaryIdx];
+    steps.push({
+      id: "periodo-activo",
+      title: "Selección del período activo (tabla del lambda)",
+      status: isFallback ? "warning" : "ok",
+      detail: isFallback
+        ? `La tabla indica que el activo es ${activeKey} (${activeInfo?.nombre}), pero Siglo 21 NO devolvió ese período. El lambda cotiza como respaldo el PRIMER período de la lista (${primaryRow.name}-${primaryRow.subPeriod}) y lo presenta con el nombre, fechas y meses de ${activeKey}: monto de un período, textos de otro.`
+        : `Período activo según la tabla hardcodeada (regla HF-0113): ${activeKey} (${activeInfo?.nombre}), ventana ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""}. Es el precio que ve el estudiante; el resto queda como alternativo oculto.`,
+    });
+
+    primaryRow.use = "primary";
+    primaryRow.useLabel = isFallback
+      ? `Principal por RESPALDO (no coincide con ${activeKey})`
+      : "Principal (el que ve el estudiante)";
+    const primaryPd = await fetchPrice(primaryIdx);
+    if (!primaryPd) {
+      steps.push({
+        id: "precios",
+        title: "3/3 — Precio del período principal",
+        status: "fail",
+        detail: `Falló el precio del período principal (${primaryRow.name}-${primaryRow.subPeriod}): ${primaryRow.fetch?.errorDetail}. El lambda corta acá con 500 y NO consulta los alternativos.`,
+      });
+      for (const row of periods) if (row !== primaryRow) row.useLabel = "No consultado: el lambda cortó al fallar el principal";
+      return finish(
+        {
+          code: "PRICE_FETCH_ERROR",
+          httpEquivalent: 500,
+          title: "Siglo 21 no devolvió el precio del período principal",
+          explanation: `Turnos y períodos existen, pero la API de precios falló para el período principal ${primaryRow.name}-${primaryRow.subPeriod}. get-price-v4 responde 500 (aunque haya otros períodos) y el bot deriva a Admisión. Reportar a Siglo 21 con el detalle técnico.`,
+          responsible: "siglo21",
+        },
+        businessError(500)
+      );
+    }
+    priceData["primary"] = primaryPd;
+
+    // Alternativos: secuenciales; los que fallan se omiten en silencio.
+    for (let i = 0; i < periods.length; i++) {
+      const row = periods[i];
+      if (row === primaryRow) continue;
+      if (row.periodId === primaryRow.periodId && row.subPeriodId === primaryRow.subPeriodId) {
+        row.useLabel = "Omitido: mismos IDs que el principal";
+        continue;
+      }
+      if (!row.key) {
+        row.useLabel = "Omitido: no se puede armar la clave (name/subperiod)";
+        continue;
+      }
+      if (priceData[ALT_PERIOD_PREFIX + row.key]) {
+        row.useLabel = `Omitido: la clave ${row.key} ya se cotizó`;
+        continue;
+      }
+      const shown = ED_EHD_PERIOD_ORDER.includes(row.key);
+      row.use = shown ? "alternative" : "alternative_not_shown";
+      const pd = await fetchPrice(i);
+      if (!pd) {
+        partialFailures++;
+        row.useLabel = "Alternativo — FALLÓ el precio, se omite en silencio";
+        continue;
+      }
+      priceData[ALT_PERIOD_PREFIX + row.key] = pd;
+      row.useLabel = shown
+        ? "Alternativo oculto (solo si rechaza el principal)"
+        : `Cotizado pero NO se muestra (${row.key} no está en la tabla del lambda)`;
+    }
+
+    const alts = shownEdEhdAlternatives(priceData);
+    steps.push({
+      id: "precios",
+      title: "3/3 — Precios (principal + alternativos)",
+      status: partialFailures > 0 ? "warning" : "ok",
+      detail: `Precio principal OK (${money(primaryPd.price.total)}). Alternativos que ve el bot: ${alts.length}${
+        partialFailures > 0 ? `. ${partialFailures} alternativo(s) fallaron y el lambda los omite en silencio` : ""
+      }.`,
+    });
+
+    const cuota6 = round2(primaryPd.price.total / 6);
+    extra.quote = {
+      kind: "bimester",
+      periodKey: activeKey,
+      periodName: activeInfo?.nombre || activeKey,
+      total: primaryPd.price.total,
+      cuota6,
+      cuota3: round2(primaryPd.price.total / 3),
+      coverageLabel: buildPeriodCoverageLabel(activeKey, primaryPd),
+      courseCoverageLine: buildCourseCoverageLine(programId, activeKey, primaryPd),
+      fallbackPeriod: isFallback ? `${primaryRow.name}-${primaryRow.subPeriod}` : undefined,
+      alternatives: alts.map((a) => ({
+        key: a.key,
+        name: ED_EHD_PERIODS[a.key]?.nombre || a.key,
+        total: a.pd.price.total,
+        cuota6: round2(a.pd.price.total / 6),
+        cuota3: round2(a.pd.price.total / 3),
+        coverageLabel: buildPeriodCoverageLabel(a.key, a.pd),
+      })),
     };
 
-    const preciosUrl = `${BASE_URL}/precios/carrera/${programId}/modalidad/${modalityId}/cau/${encodeURIComponent(cauId)}/turno/${encodeURIComponent(turnoCode)}/periodo/${periodId}/subperiodo/${subPeriodId}/codigo/${encodeURIComponent(subPeriod)}`;
-    const outcome = await timedFetch(preciosUrl, token);
-
-    if (outcome.ok) {
-      let total: number | undefined;
-      let totalListPrice: number | undefined;
-      let totalDiscounts: number | undefined;
-      let parseError: string | undefined;
-      try {
-        const parsed = JSON.parse(outcome.body);
-        total = typeof parsed?.total === "number" ? parsed.total : undefined;
-        totalListPrice = typeof parsed?.totalPrecioLista === "number" ? parsed.totalPrecioLista : undefined;
-        totalDiscounts = typeof parsed?.totalDescuentos === "number" ? parsed.totalDescuentos : undefined;
-      } catch {
-        parseError = "Respondió 200 pero el cuerpo no es JSON válido.";
-      }
-
-      periodPrices.push({
-        periodName,
-        subPeriod,
-        periodId,
-        subPeriodId,
-        url: preciosUrl,
-        ok: !parseError,
-        httpStatus: outcome.httpStatus,
-        durationMs: outcome.durationMs,
-        total,
-        totalListPrice,
-        totalDiscounts,
-        rawResponse: truncate(outcome.body),
-        errorDetail: parseError,
-        ...roleFields,
-      });
-    } else {
-      periodPrices.push({
-        periodName,
-        subPeriod,
-        periodId,
-        subPeriodId,
-        url: preciosUrl,
-        ok: false,
-        httpStatus: outcome.httpStatus,
-        durationMs: outcome.durationMs,
-        rawResponse: truncate(outcome.body),
-        errorDetail: describeHttpFailure(outcome),
-        ...roleFields,
-      });
-    }
-  }
-
-  const okCount = periodPrices.filter((p) => p.ok).length;
-  const failCount = periodPrices.length - okCount;
-
-  if (okCount === 0) {
-    steps.push({
-      id: "precios",
-      title: "3/3 — Precios por período",
-      status: "fail",
-      detail: `Se consultó el precio de los ${periodPrices.length} período(s) y TODOS fallaron. Ver el detalle por período más abajo.`,
-    });
+    const output = formatPriceResponseV4(priceData, modalityId, req, now);
     return finish(
-      {
-        code: "PRICE_FETCH_ERROR",
-        httpEquivalent: 500,
-        title: "Siglo 21 no devolvió precio para ningún período",
-        explanation: `Los turnos y períodos existen, pero la API de precios de Siglo 21 falló para TODOS los períodos (${periodPrices.length}). El agente IA no pudo dar precio. Puede ser un error temporal de Siglo 21 o que los períodos no estén activos en su configuración de precios. Reportar a Siglo 21 adjuntando los errores de cada período (detalle técnico abajo).`,
-        responsible: "siglo21",
-      },
-      input,
-      { turnoCode, turnoName }
+      partialFailures > 0
+        ? {
+            code: "OK_PARTIAL",
+            httpEquivalent: 200,
+            title: "Precio obtenido, pero con alternativos omitidos",
+            explanation: `El bot SÍ recibió precio de ${activeInfo?.nombre ?? activeKey} (6 cuotas de ${money(cuota6)}), pero ${partialFailures} período(s) alternativos fallaron en Siglo 21 y se omitieron en silencio.${
+              isFallback ? ` Ojo: el monto es del período ${primaryRow.name}-${primaryRow.subPeriod} (respaldo), no de ${activeKey}.` : ""
+            }`,
+            responsible: "siglo21",
+          }
+        : {
+            code: "OK",
+            httpEquivalent: 200,
+            title: isFallback ? "Precio obtenido — con período de respaldo" : "Todo funcionó correctamente",
+            explanation: isFallback
+              ? `get-price-v4 responde 200, pero Siglo 21 no devolvió el período activo ${activeKey}: el monto (${money(primaryPd.price.total)}) es del período ${primaryRow.name}-${primaryRow.subPeriod} y el texto dice ${activeInfo?.nombre}. Revisar si la tabla del lambda está desactualizada o si falta el período en Siglo 21.`
+              : `get-price-v4 responde 200 con precio de ${activeInfo?.nombre ?? activeKey}: 6 cuotas de ${money(cuota6)}${alts.length ? ` y ${alts.length} alternativo(s) oculto(s)` : ""}. Si el bot no dio precio en la conversación, el problema no fue esta consulta en este momento (pudo ser temporal o de otro punto del flujo).`,
+            responsible: isFallback ? "middleware" : "nadie",
+          },
+      { httpStatus: 200, body: { output } }
     );
   }
 
-  if (failCount > 0) {
-    steps.push({
-      id: "precios",
-      title: "3/3 — Precios por período",
-      status: "warning",
-      detail: `${okCount} período(s) con precio OK, pero ${failCount} período(s) fallaron y el middleware los OMITE EN SILENCIO (no aparecen en la respuesta del agente IA). Ver detalle por período.`,
-    });
-    return finish(
-      {
-        code: "OK_PARTIAL",
-        httpEquivalent: 200,
-        title: "Precio obtenido, pero con períodos omitidos",
-        explanation: `El agente IA SÍ recibió precio (${okCount} de ${periodPrices.length} períodos), pero ${failCount} período(s) fallaron en Siglo 21 y se omitieron en silencio. Si el estudiante preguntaba por uno de los períodos omitidos, el agente IA no tenía ese dato. Revisar el detalle por período para ver cuáles fallaron y por qué.`,
-        responsible: "siglo21",
-      },
-      input,
-      { turnoCode, turnoName }
-    );
-  }
-
+  // ── Modalidad sin lógica de precio en v4 → 500 ─────────────────────────────
+  // getPricesByModalityV4 no cotiza nada: "no prices could be obtained for any period".
+  for (const r of periods) r.useLabel = "Ignorado: modalidad sin lógica de precio en v4";
   steps.push({
     id: "precios",
-    title: "3/3 — Precios por período",
-    status: "ok",
-    detail: `Se obtuvo precio para los ${okCount} período(s) sin errores.`,
+    title: "3/3 — Precios",
+    status: "fail",
+    detail: `La modalidad ${modalityId} no entra en ninguna rama de precio de v4: no se consulta ningún precio y el lambda responde 500.`,
   });
-
   return finish(
     {
-      code: "OK",
-      httpEquivalent: 200,
-      title: "Todo funcionó correctamente",
-      explanation: `La consulta completa funcionó: hay turno, ${periodPrices.length} período(s) y todos con precio. Si el agente IA no dio precio en la conversación, el problema NO fue esta consulta a Siglo 21 en este momento — pudo ser un error temporal en el momento de la conversación, o un problema en otro punto del flujo del agente IA.`,
-      responsible: "nadie",
+      code: "UNSUPPORTED_MODALITY",
+      httpEquivalent: 500,
+      title: "Modalidad no soportada en get-price-v4",
+      explanation: `get-price-v4 solo cotiza las modalidades 1, 2, 3, 4, 5 y 7 (lógica bimestral) y deriva 9, 10 y 12. La modalidad ${modalityId} pasa la validación, consume token + turnos + períodos y termina en 500 (el bot deriva a Admisión). Verificar que el modality_id que envía la tool sea el correcto según el mapeo oficial.`,
+      responsible: "config",
     },
-    input,
-    { turnoCode, turnoName }
+    businessError(500)
   );
 }
