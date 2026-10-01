@@ -93,7 +93,6 @@ const VERDICT_STYLES: Record<string, { badge: string; card: string; label: strin
   OK: { badge: "bg-primary-600", card: "border-primary-200 bg-primary-50", label: "✅ TODO OK" },
   OK_PARTIAL: { badge: "bg-amber-500", card: "border-amber-200 bg-amber-50", label: "⚠️ OK CON OMISIONES" },
   ADVISOR_MODALITY: { badge: "bg-secondary-600", card: "border-secondary-200 bg-secondary-50", label: "ℹ️ DERIVA A ASESOR" },
-  OCTOBER_PERIOD_MISSING: { badge: "bg-orange-600", card: "border-orange-200 bg-orange-50", label: "⚠️ 200 SIN PRECIO" },
   INVALID_REQUEST_BODY: { badge: "bg-orange-600", card: "border-orange-200 bg-orange-50", label: "✏️ REQUEST INVÁLIDO" },
   MISSING_REQUIRED_FIELD: { badge: "bg-orange-600", card: "border-orange-200 bg-orange-50", label: "✏️ DATOS INCOMPLETOS" },
   UNSUPPORTED_MODALITY: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "🚫 MODALIDAD NO SOPORTADA EN V4" },
@@ -115,8 +114,7 @@ const RESPONSIBLE_LABELS: Record<string, string> = {
 const BRANCH_LABELS: Record<string, string> = {
   validation: "validación",
   advisor: "deriva a asesor (9, 10, 12)",
-  ed_ehd: "ED/EHD (1, 2)",
-  october_march: "octubre/marzo (3, 4, 5, 7)",
+  bimester: "bimestral (1, 2, 3, 4, 5, 7)",
   unsupported: "sin lógica de precio",
 };
 
@@ -129,10 +127,7 @@ const STEP_ICONS: Record<string, string> = {
 
 const USE_BADGES: Record<string, string> = {
   primary: "bg-primary-100 text-primary-800 border-primary-200 font-bold",
-  october_priority: "bg-primary-100 text-primary-800 border-primary-200 font-bold",
-  march_only: "bg-primary-100 text-primary-800 border-primary-200 font-bold",
   alternative: "bg-gray-100 text-gray-600 border-gray-200",
-  march_alternative: "bg-gray-100 text-gray-600 border-gray-200",
   alternative_not_shown: "bg-amber-50 text-amber-800 border-amber-200",
   ignored: "bg-white text-gray-400 border-gray-200",
 };
@@ -262,7 +257,6 @@ function buildReport(r: DiagnosisResult): string {
   lines.push(`${r.verdict.title}: ${r.verdict.explanation}`);
   lines.push(`Evaluado: ${r.evaluatedAt}`);
   if (r.turnoCode !== undefined) lines.push(`Turno usado: ${r.turnoName} (código ${r.turnoCode})`);
-  if (r.cutoff) lines.push(`Corte octubre/marzo: ${r.cutoff.cutoffIso} → ${r.cutoff.beforeCutoff ? "ANTES del corte" : "DESPUÉS del corte"}`);
   lines.push("");
   lines.push("Pasos:");
   for (const s of r.steps) {
@@ -313,94 +307,48 @@ function PriceSentence({ children }: { children: ReactNode }) {
 }
 
 function QuoteMessage({ q }: { q: Quote }) {
-  if (q.kind === "ed_ehd") {
-    return (
-      <>
-        <p className="text-sm">
-          Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en {q.periodName}.
-        </p>
-        {q.courseCoverageLine && <p className="text-sm mt-1">{q.courseCoverageLine}</p>}
-        <PriceSentence>
-          Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de {money(q.cuota6)} (dependiendo
-          del banco de tu tarjeta).
-        </PriceSentence>
-        <p className="text-sm text-gray-700">
-          Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y materiales de estudio
-          digitales y acceso a biblioteca.
-        </p>
-        <p className="mt-1 text-sm font-medium">¿Te parece viable esta forma de pago?</p>
-        <div className="mt-3 border-t border-dashed border-gray-200 pt-2 text-xs text-gray-500 space-y-1">
-          {q.coverageLabel && (
-            <p>
-              🗓️ El agente aclara los meses de cursado: <span className="font-semibold text-gray-700">{q.coverageLabel}</span>.
-            </p>
-          )}
-          <p>
-            🔁 Si el estudiante no puede con 6 cuotas, ofrece{" "}
-            <span className="font-semibold text-gray-700">3 cuotas fijas de {money(q.cuota3)}</span>.
-          </p>
-          {q.alternatives.length > 0 && (
-            <p>
-              📅 {q.alternatives.length} período(s) alternativo(s) que ofrece{" "}
-              <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>:{" "}
-              {q.alternatives
-                .map((a) => `${a.name} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
-                .join(" · ")}
-              .
-            </p>
-          )}
-          {q.fallbackPeriod && (
-            <p className="text-amber-700">
-              ⚠️ El monto es del período {q.fallbackPeriod} (respaldo: Siglo 21 no devolvió {q.periodKey}), pero el texto
-              dice {q.periodName}.
-            </p>
-          )}
-        </div>
-      </>
-    );
-  }
-  if (q.kind === "october") {
-    return (
-      <>
-        <p className="text-sm">
-          Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en octubre 2026.
-        </p>
-        <PriceSentence>
-          El bimestre es {money(q.amount3)} en 3 pagos con VISA o Mastercard
-        </PriceSentence>
-        <p className="text-sm text-gray-700">
-          e incluye matrícula, arancel del bimestre, derechos de examen, materiales digitales y acceso a biblioteca.
-          🚀 Octubre 2026 es tu momento en la universidad más elegida de Argentina.
-        </p>
-        <p className="mt-1 text-sm font-medium">¿Te resulta viable con cuotas, o preferís otra forma de pago?</p>
-        <div className="mt-3 border-t border-dashed border-gray-200 pt-2 text-xs text-gray-500 space-y-1">
-          {q.march ? (
-            <p>
-              📅 Si rechaza octubre, el agente ofrece{" "}
-              <span className="font-semibold text-gray-700">marzo 2027 en 6 cuotas de {money(q.march.cuota6)}</span>.
-            </p>
-          ) : (
-            <p>📅 Sin alternativa de marzo 2027 (no se obtuvo su precio).</p>
-          )}
-          <p>ℹ️ Este bloque de v4 no trae [REGLAS CRÍTICAS] ni la instrucción de marcar interest_qualification_reason = 55.</p>
-        </div>
-      </>
-    );
-  }
   return (
     <>
       <p className="text-sm">
-        Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en marzo 2027.
+        Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en {q.periodName}.
       </p>
+      {q.courseCoverageLine && <p className="text-sm mt-1">{q.courseCoverageLine}</p>}
       <PriceSentence>
-        Hoy podés inscribirte y abonar el cuatrimestre completo en 6 cuotas de {money(q.cuota6)} con tarjeta VISA o
-        MASTERCARD.
+        Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de {money(q.cuota6)} (dependiendo
+        del banco de tu tarjeta).
       </PriceSentence>
       <p className="text-sm text-gray-700">
-        Este arancel incluye matrícula, el arancel del cuatrimestre, derechos de examen, materiales de estudio
+        Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y materiales de estudio
         digitales y acceso a biblioteca.
       </p>
       <p className="mt-1 text-sm font-medium">¿Te parece viable esta forma de pago?</p>
+      <div className="mt-3 border-t border-dashed border-gray-200 pt-2 text-xs text-gray-500 space-y-1">
+        {q.coverageLabel && (
+          <p>
+            🗓️ El agente aclara los meses de cursado: <span className="font-semibold text-gray-700">{q.coverageLabel}</span>.
+          </p>
+        )}
+        <p>
+          🔁 Si el estudiante no puede con 6 cuotas, ofrece{" "}
+          <span className="font-semibold text-gray-700">3 cuotas fijas de {money(q.cuota3)}</span>.
+        </p>
+        {q.alternatives.length > 0 && (
+          <p>
+            📅 {q.alternatives.length} período(s) alternativo(s) que ofrece{" "}
+            <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>:{" "}
+            {q.alternatives
+              .map((a) => `${a.name} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
+              .join(" · ")}
+            .
+          </p>
+        )}
+        {q.fallbackPeriod && (
+          <p className="text-amber-700">
+            ⚠️ El monto es del período {q.fallbackPeriod} (respaldo: Siglo 21 no devolvió {q.periodKey}), pero el texto
+            dice {q.periodName}.
+          </p>
+        )}
+      </div>
     </>
   );
 }
@@ -421,19 +369,6 @@ function BotMessage({ result }: { result: DiagnosisResult }) {
         </p>
         <p className="mt-2 text-xs text-gray-500">
           ℹ️ get-price-v4 responde 200 con la instrucción de derivar (sin consultar a Siglo 21).
-        </p>
-      </>
-    );
-  } else if (code === "OCTOBER_PERIOD_MISSING") {
-    body = (
-      <>
-        <p className="text-sm text-gray-700">
-          El agente recibe como resultado de la tool <span className="font-semibold">solo este texto</span>, con HTTP 200:
-        </p>
-        <PriceSentence>{lambdaOutputText(result)}</PriceSentence>
-        <p className="text-xs text-gray-500">
-          ⚠️ Sin monto y sin la instrucción de error que ordena derivar a Admisión: lo que responda el agente depende
-          del modelo y no está controlado por la tool.
         </p>
       </>
     );
@@ -477,7 +412,7 @@ function BotMessage({ result }: { result: DiagnosisResult }) {
 // ── Respuesta exacta del lambda ────────────────────────────────────────────────
 
 function LambdaResponseBlock({ result }: { result: DiagnosisResult }) {
-  const [open, setOpen] = useState(result.verdict.code === "OCTOBER_PERIOD_MISSING");
+  const [open, setOpen] = useState(false);
   const status = result.lambdaResponse.httpStatus;
   const body = result.lambdaResponse.body as { output?: unknown };
   const field = typeof body?.output === "string" ? "output" : "error";
@@ -540,7 +475,7 @@ function ContextAmounts({
   );
 }
 
-const ED_RULES = [
+const BIMESTER_RULES = [
   "La oración del precio (y la del período de cursado, si aplica) es inmutable.",
   "Aclara siempre qué meses de cursado abarca el período que presenta.",
   "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca más por iniciativa propia.",
@@ -549,21 +484,6 @@ const ED_RULES = [
   "Medios de pago / bancos / promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
   "Prohibido mencionar transferencia bancaria. Objeción económica: Protocolo de Beneficios Económicos.",
   "Al entregar el precio, marca el CRM: interest_qualification_reason = 55.",
-];
-
-const MARCH_RULES = [
-  "La oración del precio (6 cuotas, cuatrimestre completo, VISA o MASTERCARD) es inmutable.",
-  "No hace cálculos ni explica precios adicionales salvo pedido explícito.",
-  "Medios de pago / bancos / promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
-  "Prohibido mencionar transferencia bancaria. Objeción económica: Protocolo de Beneficios Económicos.",
-  "Al entregar el precio, marca el CRM: interest_qualification_reason = 55.",
-];
-
-const OCTOBER_RULES = [
-  "SIEMPRE presenta PRIMERO octubre 2026 (3 pagos).",
-  "NO menciona marzo 2027 salvo que el estudiante rechace octubre; recién ahí ofrece marzo (6 cuotas).",
-  "Enfatiza las ventajas de empezar AHORA.",
-  "Sin [REGLAS CRÍTICAS]: no hay oración inmutable ni instrucción de marcar interest_qualification_reason = 55.",
 ];
 
 function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onClose: () => void }) {
@@ -581,7 +501,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
   }, [onClose]);
 
   const q = result.quote;
-  const rules = q?.kind === "ed_ehd" ? ED_RULES : q?.kind === "march" ? MARCH_RULES : q?.kind === "october" ? OCTOBER_RULES : [];
+  const rules = q ? BIMESTER_RULES : [];
 
   return (
     <div
@@ -614,7 +534,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
         </div>
 
         <div className="px-5 py-4 space-y-5">
-          {q?.kind === "ed_ehd" && (
+          {q && (
             <>
               <ContextAmounts
                 title={`📋 Período principal — ${q.periodName}`}
@@ -642,38 +562,6 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
                 />
               ))}
             </>
-          )}
-          {q?.kind === "october" && (
-            <>
-              <ContextAmounts
-                title="📋 Octubre 2026 (prioridad)"
-                tone="primary"
-                rows={[
-                  ["Total del bimestre", money(q.total)],
-                  ["3 pagos", money(q.amount3)],
-                ]}
-              />
-              {q.march && (
-                <ContextAmounts
-                  title="📅 Marzo 2027 (solo si rechaza octubre)"
-                  tone="alt"
-                  rows={[
-                    ["Total", money(q.march.total)],
-                    ["6 cuotas", money(q.march.cuota6)],
-                  ]}
-                />
-              )}
-            </>
-          )}
-          {q?.kind === "march" && (
-            <ContextAmounts
-              title="📋 Marzo 2027 (único precio después del corte)"
-              tone="primary"
-              rows={[
-                ["Total del cuatrimestre", money(q.total)],
-                ["6 cuotas", money(q.cuota6)],
-              ]}
-            />
           )}
 
           {rules.length > 0 && (

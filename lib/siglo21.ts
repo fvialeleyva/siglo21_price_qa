@@ -1,29 +1,25 @@
-// Réplica de get-price-v4 del lambda siglo21-price-proxy (rama main) con fines de
+// Réplica de get-price-v4 del lambda siglo21-price-proxy (rama
+// feat/v4-presencial-bimester, PR #22 de conversia-legacy-lambdas) con fines de
 // diagnóstico: en lugar de retornar solo el output o un error, registra cada
 // paso (URL, status HTTP, respuesta cruda, duración), qué hace v4 con cada
 // período que devuelve Siglo 21 y la respuesta exacta (HTTP + body) que daría
-// el lambda. La lógica pura (tablas, corte de octubre, formateador) vive en
+// el lambda. La lógica pura (tabla de bimestres, formateador) vive en
 // ./get-price-v4.ts.
 
 import {
   ADVISOR_MESSAGE,
   ADVISOR_MODALITIES,
   ALT_PERIOD_PREFIX,
+  BIMESTER_MODALITIES,
   DEFAULT_LLM_INSTRUCTION_ERROR,
-  ED_EHD_MODALITIES,
   ED_EHD_PERIOD_ORDER,
   ED_EHD_PERIODS,
-  MARCH_PERIOD_NAME,
   MODALITY_NAMES,
-  OCTOBER_MODALITIES,
-  OCTOBER_PERIOD_NAME,
-  UNDETERMINED_TARIFF_OUTPUT,
   buildCourseCoverageLine,
   buildEdEhdPeriodKey,
   buildPeriodCoverageLabel,
   formatPriceResponseV4,
   getActiveEdEhdPeriodKey,
-  octoberCutoff,
   round2,
   shownEdEhdAlternatives,
   type PriceData,
@@ -80,19 +76,11 @@ export interface PriceFetchResult {
 }
 
 /**
- * Qué hace v4 con cada período que devuelve Siglo 21:
- * - primary / alternative / alternative_not_shown: ED/EHD
- * - october_priority / march_alternative / march_only: modalidades 3, 4, 5, 7
+ * Qué hace v4 con cada período que devuelve Siglo 21 (rama bimestral):
+ * - primary / alternative / alternative_not_shown
  * - ignored: v4 no lo cotiza (ver useLabel)
  */
-export type PeriodUse =
-  | "primary"
-  | "alternative"
-  | "alternative_not_shown"
-  | "october_priority"
-  | "march_alternative"
-  | "march_only"
-  | "ignored";
+export type PeriodUse = "primary" | "alternative" | "alternative_not_shown" | "ignored";
 
 export interface PeriodRow {
   name: string;
@@ -101,11 +89,11 @@ export interface PeriodRow {
   subPeriodId: number;
   from: string;
   to: string;
-  /** Clave ED/EHD armada como el lambda (ej: "2B/26"), si aplica */
+  /** Clave del bimestre armada como el lambda (ej: "2B/26"), si aplica */
   key?: string;
   /** Nombre legible según la tabla del lambda (ej: "octubre 2026") */
   keyLabel?: string;
-  /** Meses de cursado que abarca (regla comercial fija; solo ED/EHD) */
+  /** Meses de cursado que abarca (regla comercial fija; solo rama bimestral) */
   coverageLabel?: string;
   use: PeriodUse;
   /** Explicación de por qué v4 lo usa o lo ignora */
@@ -125,7 +113,6 @@ export type VerdictCode =
   | "NO_PERIODS_AVAILABLE"
   | "NO_ACTIVE_ED_EHD_PERIOD"
   | "PRICE_FETCH_ERROR"
-  | "OCTOBER_PERIOD_MISSING"
   | "UNSUPPORTED_MODALITY";
 
 export interface Verdict {
@@ -140,25 +127,22 @@ export interface Verdict {
 }
 
 /** Rama de v4 por la que pasa la consulta. */
-export type V4Branch = "validation" | "advisor" | "ed_ehd" | "october_march" | "unsupported";
+export type V4Branch = "validation" | "advisor" | "bimester" | "unsupported";
 
 /** Datos del bloque de precio que arma v4 (para el preview del mensaje del bot). */
-export type Quote =
-  | {
-      kind: "ed_ehd";
-      periodKey: string;
-      periodName: string;
-      total: number;
-      cuota6: number;
-      cuota3: number;
-      coverageLabel: string;
-      courseCoverageLine: string;
-      /** El período cotizado no coincide con la clave activa (respaldo: primer período de la API) */
-      fallbackPeriod?: string;
-      alternatives: { key: string; name: string; total: number; cuota6: number; cuota3: number; coverageLabel: string }[];
-    }
-  | { kind: "october"; total: number; amount3: number; march?: { total: number; cuota6: number } }
-  | { kind: "march"; total: number; cuota6: number };
+export interface Quote {
+  kind: "bimester";
+  periodKey: string;
+  periodName: string;
+  total: number;
+  cuota6: number;
+  cuota3: number;
+  coverageLabel: string;
+  courseCoverageLine: string;
+  /** El período cotizado no coincide con la clave activa (respaldo: primer período de la API) */
+  fallbackPeriod?: string;
+  alternatives: { key: string; name: string; total: number; cuota6: number; cuota3: number; coverageLabel: string }[];
+}
 
 export interface DiagnosisResult {
   input: { cau_id: string; modality_id: number; program_id: number };
@@ -170,11 +154,9 @@ export interface DiagnosisResult {
   periods: PeriodRow[];
   turnoCode?: string;
   turnoName?: string;
-  /** Clave del período activo según la tabla hardcodeada del lambda (ED/EHD) */
+  /** Clave del período activo según la tabla hardcodeada del lambda (rama bimestral) */
   primaryPeriodKey?: string;
   primaryPeriodName?: string;
-  /** Corte octubre/marzo evaluado (modalidades 3, 4, 5, 7) */
-  cutoff?: { cutoffIso: string; beforeCutoff: boolean };
   quote?: Quote;
   /** Respuesta exacta que daría POST /v1/get-price-v4 */
   lambdaResponse: { httpStatus: number; body: unknown };
@@ -622,20 +604,16 @@ export async function diagnose(
     );
   }
 
-  if (ED_EHD_MODALITIES.has(modalityId)) branch = "ed_ehd";
-  else if (OCTOBER_MODALITIES.has(modalityId)) branch = "october_march";
-  else branch = "unsupported";
+  branch = BIMESTER_MODALITIES.has(modalityId) ? "bimester" : "unsupported";
 
   steps.push({
     id: "modality-check",
     title: "Chequeo de modalidad",
     status: branch === "unsupported" ? "warning" : "ok",
     detail:
-      branch === "ed_ehd"
-        ? `Modalidad ${modalityId} (${modalityName}) — rama ED/EHD: período activo por tabla hardcodeada + alternativos ocultos.`
-        : branch === "october_march"
-          ? `Modalidad ${modalityId} (${modalityName}) — rama octubre/marzo: busca los períodos "${OCTOBER_PERIOD_NAME}" (octubre) y "${MARCH_PERIOD_NAME}" (marzo) con corte el 17/10 23:59:59 UTC.`
-          : `La modalidad ${modalityId} (${modalityName}) no tiene lógica de precio en v4. El lambda NO la rechaza: igual pide token, turnos y períodos, y termina en 500.`,
+      branch === "bimester"
+        ? `Modalidad ${modalityId} (${modalityName}) — rama bimestral (1, 2, 3, 4, 5, 7): período activo por tabla hardcodeada + alternativos ocultos.`
+        : `La modalidad ${modalityId} (${modalityName}) no tiene lógica de precio en v4. El lambda NO la rechaza: igual pide token, turnos y períodos, y termina en 500.`,
   });
 
   // ── Paso 3: Token ──────────────────────────────────────────────────────────
@@ -862,8 +840,8 @@ export async function diagnose(
   const priceData: PriceDataMap = {};
   let partialFailures = 0;
 
-  // ── Paso 6a: Rama ED/EHD ───────────────────────────────────────────────────
-  if (branch === "ed_ehd") {
+  // ── Paso 6: Rama bimestral (1, 2, 3, 4, 5, 7) ──────────────────────────────
+  if (branch === "bimester") {
     const activeKey = getActiveEdEhdPeriodKey(now);
     for (const row of periods) {
       const key = buildEdEhdPeriodKey(row.name, row.subPeriod);
@@ -885,7 +863,7 @@ export async function diagnose(
         {
           code: "NO_ACTIVE_ED_EHD_PERIOD",
           httpEquivalent: 500,
-          title: "La tabla de períodos ED/EHD del lambda no cubre la fecha de hoy",
+          title: "La tabla de períodos bimestrales del lambda no cubre la fecha de hoy",
           explanation: `get-price-v4 busca el período activo en su tabla hardcodeada (${ED_EHD_PERIOD_ORDER.join(", ")}) y hoy no cae en ninguna ventana de venta. Responde 500 y el bot deriva a Admisión. Hay que cargar las fechas del ciclo nuevo en el lambda — no es un problema de Siglo 21.`,
           responsible: "middleware",
         },
@@ -978,7 +956,7 @@ export async function diagnose(
 
     const cuota6 = round2(primaryPd.price.total / 6);
     extra.quote = {
-      kind: "ed_ehd",
+      kind: "bimester",
       periodKey: activeKey,
       periodName: activeInfo?.nombre || activeKey,
       total: primaryPd.price.total,
@@ -1022,206 +1000,23 @@ export async function diagnose(
     );
   }
 
-  // ── Paso 6b: Rama octubre/marzo (y modalidades no soportadas) ──────────────
-  // getPricesByModalityV4 busca por `name` exacto y se queda con el ÚLTIMO match.
-  let octIdx = -1;
-  let marIdx = -1;
-  periods.forEach((r, i) => {
-    if (r.name === OCTOBER_PERIOD_NAME) octIdx = i;
-    if (r.name === MARCH_PERIOD_NAME) marIdx = i;
-  });
-
-  let octoberFailed = false;
-  let marchFailed = false;
-  const { cutoff, beforeCutoff } = octoberCutoff(now);
-
-  if (branch === "october_march") {
-    extra.cutoff = { cutoffIso: cutoff.toISOString(), beforeCutoff };
-    steps.push({
-      id: "corte",
-      title: "Corte octubre/marzo",
-      status: "ok",
-      detail: `Ahora: ${now.toISOString()} · corte: ${cutoff.toISOString()} (17/10 23:59:59 UTC del año en curso = 20:59:59 ART). ${
-        beforeCutoff
-          ? `ANTES del corte → v4 cotiza "${OCTOBER_PERIOD_NAME}" (octubre, prioridad) y "${MARCH_PERIOD_NAME}" (marzo, alternativa interna).`
-          : `DESPUÉS del corte → v4 cotiza solo "${MARCH_PERIOD_NAME}" (marzo, 6 cuotas).`
-      } Siglo 21 ${octIdx >= 0 ? "SÍ" : "NO"} devolvió "${OCTOBER_PERIOD_NAME}" y ${marIdx >= 0 ? "SÍ" : "NO"} devolvió "${MARCH_PERIOD_NAME}".`,
-    });
-
-    for (let i = 0; i < periods.length; i++) {
-      if (i !== octIdx && i !== marIdx) {
-        const r = periods[i];
-        r.useLabel =
-          r.name === OCTOBER_PERIOD_NAME || r.name === MARCH_PERIOD_NAME
-            ? `Ignorado: v4 se queda con el ÚLTIMO "${r.name}" de la lista`
-            : `Ignorado: v4 solo busca "${OCTOBER_PERIOD_NAME}" y "${MARCH_PERIOD_NAME}" por nombre exacto`;
-      }
-    }
-
-    if (beforeCutoff) {
-      if (octIdx >= 0) {
-        periods[octIdx].use = "october_priority";
-        const pd = await fetchPrice(octIdx);
-        if (pd) {
-          priceData["october_priority"] = pd;
-          periods[octIdx].useLabel = "Octubre 2026 — prioridad (3 pagos)";
-        } else {
-          octoberFailed = true;
-          periods[octIdx].useLabel = "Octubre 2026 — FALLÓ el precio";
-        }
-      }
-      if (marIdx >= 0) {
-        periods[marIdx].use = "march_alternative";
-        const pd = await fetchPrice(marIdx);
-        if (pd) {
-          priceData["march_alternative"] = { ...pd, subPeriod: "A_B" };
-          periods[marIdx].useLabel = "Marzo 2027 — alternativa interna (6 cuotas)";
-        } else {
-          marchFailed = true;
-          periods[marIdx].useLabel = "Marzo 2027 — FALLÓ el precio";
-        }
-      }
-    } else {
-      if (octIdx >= 0) periods[octIdx].useLabel = "Ignorado: después del corte v4 no cotiza octubre";
-      if (marIdx >= 0) {
-        periods[marIdx].use = "march_only";
-        const pd = await fetchPrice(marIdx);
-        if (pd) {
-          priceData["march_only"] = { ...pd, subPeriod: "A_B" };
-          periods[marIdx].useLabel = "Marzo 2027 — único precio (6 cuotas)";
-        } else {
-          marchFailed = true;
-          periods[marIdx].useLabel = "Marzo 2027 — FALLÓ el precio";
-        }
-      }
-    }
-  } else {
-    for (const r of periods) r.useLabel = "Ignorado: modalidad sin lógica de precio en v4";
-  }
-
-  // len(priceData) == 0 → 500
-  if (Object.keys(priceData).length === 0) {
-    if (branch === "unsupported") {
-      steps.push({
-        id: "precios",
-        title: "3/3 — Precios",
-        status: "fail",
-        detail: `La modalidad ${modalityId} no entra en ninguna rama de precio de v4: no se consulta ningún precio y el lambda responde 500.`,
-      });
-      return finish(
-        {
-          code: "UNSUPPORTED_MODALITY",
-          httpEquivalent: 500,
-          title: "Modalidad no soportada en get-price-v4",
-          explanation: `get-price-v4 solo cotiza las modalidades 1, 2 (ED/EHD) y 3, 4, 5, 7 (octubre/marzo), y deriva 9, 10 y 12. La modalidad ${modalityId} pasa la validación, consume token + turnos + períodos y termina en 500 (el bot deriva a Admisión). Verificar que el modality_id que envía la tool sea el correcto según el mapeo oficial.`,
-          responsible: "config",
-        },
-        businessError(500)
-      );
-    }
-    const why = beforeCutoff
-      ? `${octIdx < 0 ? `Siglo 21 no devolvió "${OCTOBER_PERIOD_NAME}"` : `falló el precio de "${OCTOBER_PERIOD_NAME}"`} y ${marIdx < 0 ? `no devolvió "${MARCH_PERIOD_NAME}"` : `falló el precio de "${MARCH_PERIOD_NAME}"`}`
-      : marIdx < 0
-        ? `después del corte v4 solo cotiza "${MARCH_PERIOD_NAME}" y Siglo 21 no lo devolvió`
-        : `después del corte v4 solo cotiza "${MARCH_PERIOD_NAME}" y su precio falló`;
-    steps.push({
-      id: "precios",
-      title: "3/3 — Precios",
-      status: "fail",
-      detail: `No se obtuvo ningún precio: ${why}. El lambda responde 500.`,
-    });
-    const apiFailed = octoberFailed || marchFailed;
-    return finish(
-      {
-        code: "PRICE_FETCH_ERROR",
-        httpEquivalent: 500,
-        title: "No se obtuvo ningún precio utilizable",
-        explanation: `get-price-v4 responde 500 (el bot deriva a Admisión) porque ${why}. ${
-          apiFailed
-            ? "Reportar a Siglo 21 los errores de precio (detalle técnico abajo)."
-            : `Los nombres "${OCTOBER_PERIOD_NAME}" / "${MARCH_PERIOD_NAME}" están hardcodeados en el lambda: si Siglo 21 ya publica otros períodos, hay que actualizar el lambda.`
-        }`,
-        responsible: apiFailed ? "siglo21" : "middleware",
-      },
-      businessError(500)
-    );
-  }
-
-  const output = formatPriceResponseV4(priceData, modalityId, req, now);
-  const march = priceData["march_alternative"] ?? priceData["march_only"];
-
-  // Antes del corte, sin octubre pero con marzo → 200 sin precio.
-  if (output === UNDETERMINED_TARIFF_OUTPUT) {
-    const marchCuota6 = march ? round2(march.price.total / 6) : undefined;
-    steps.push({
-      id: "precios",
-      title: "3/3 — Precios",
-      status: "fail",
-      detail: `${octIdx < 0 ? `Siglo 21 no devolvió el período "${OCTOBER_PERIOD_NAME}"` : `Falló el precio de "${OCTOBER_PERIOD_NAME}"`}; marzo "${MARCH_PERIOD_NAME}" SÍ tiene precio${march ? ` (${money(march.price.total)})` : ""}. Antes del corte el formateador solo arma bloque con octubre, así que devuelve el texto "${UNDETERMINED_TARIFF_OUTPUT}"`,
-    });
-    return finish(
-      {
-        code: "OCTOBER_PERIOD_MISSING",
-        httpEquivalent: 200,
-        title: `200 sin precio: falta el período de octubre "${OCTOBER_PERIOD_NAME}"; Siglo 21 sí devolvió marzo "${MARCH_PERIOD_NAME}"`,
-        explanation: `${
-          octIdx < 0
-            ? `Siglo 21 no devolvió ningún período con name "${OCTOBER_PERIOD_NAME}"`
-            : `Siglo 21 devolvió "${OCTOBER_PERIOD_NAME}" pero su precio falló`
-        }. Antes del corte (17/10 23:59:59 UTC) get-price-v4 solo arma el bloque de precio con octubre, así que responde HTTP 200 con output = "${UNDETERMINED_TARIFF_OUTPUT}" — sin precio y sin la instrucción de error, aunque marzo 2027 sí tiene precio${
-          march ? ` (total ${money(march.price.total)}; 6 cuotas de ${money(marchCuota6 as number)})` : ""
-        }. El bot no recibe monto ni la orden de derivar: su respuesta queda librada al modelo. Es comportamiento del lambda (nombres de período y lógica hardcodeados), no un error de Siglo 21.`,
-        responsible: "middleware",
-      },
-      { httpStatus: 200, body: { output } }
-    );
-  }
-
-  if (beforeCutoff) {
-    const oct = priceData["october_priority"];
-    extra.quote = {
-      kind: "october",
-      total: oct.price.total,
-      amount3: round2(oct.price.total / 3),
-      march: march ? { total: march.price.total, cuota6: round2(march.price.total / 6) } : undefined,
-    };
-  } else if (march) {
-    extra.quote = { kind: "march", total: march.price.total, cuota6: round2(march.price.total / 6) };
-  }
-
-  if (marchFailed) partialFailures++;
-  const q = extra.quote;
-  const summary =
-    q?.kind === "october"
-      ? `octubre 2026 en 3 pagos de ${money(q.amount3)}${q.march ? ` (marzo 2027 como alternativa interna: 6 cuotas de ${money(q.march.cuota6)})` : " — sin alternativa de marzo"}`
-      : q?.kind === "march"
-        ? `marzo 2027 en 6 cuotas de ${money(q.cuota6)}`
-        : "";
+  // ── Modalidad sin lógica de precio en v4 → 500 ─────────────────────────────
+  // getPricesByModalityV4 no cotiza nada: "no prices could be obtained for any period".
+  for (const r of periods) r.useLabel = "Ignorado: modalidad sin lógica de precio en v4";
   steps.push({
     id: "precios",
     title: "3/3 — Precios",
-    status: partialFailures > 0 || (beforeCutoff && marIdx < 0) ? "warning" : "ok",
-    detail: `Bloque de precio: ${summary}.${
-      marchFailed ? ` El precio de marzo falló y se omite en silencio.` : beforeCutoff && marIdx < 0 ? ` Siglo 21 no devolvió "${MARCH_PERIOD_NAME}": el bot no tiene alternativa de marzo.` : ""
-    }`,
+    status: "fail",
+    detail: `La modalidad ${modalityId} no entra en ninguna rama de precio de v4: no se consulta ningún precio y el lambda responde 500.`,
   });
-
   return finish(
-    partialFailures > 0
-      ? {
-          code: "OK_PARTIAL",
-          httpEquivalent: 200,
-          title: "Precio obtenido, pero sin la alternativa de marzo",
-          explanation: `El bot SÍ recibió precio (${summary}), pero el precio de marzo "${MARCH_PERIOD_NAME}" falló en Siglo 21 y se omitió en silencio: si el estudiante rechaza octubre, el bot no tiene la alternativa.`,
-          responsible: "siglo21",
-        }
-      : {
-          code: "OK",
-          httpEquivalent: 200,
-          title: "Todo funcionó correctamente",
-          explanation: `get-price-v4 responde 200 con ${summary}. Si el bot no dio precio en la conversación, el problema no fue esta consulta en este momento (pudo ser temporal o de otro punto del flujo).`,
-          responsible: "nadie",
-        },
-    { httpStatus: 200, body: { output } }
+    {
+      code: "UNSUPPORTED_MODALITY",
+      httpEquivalent: 500,
+      title: "Modalidad no soportada en get-price-v4",
+      explanation: `get-price-v4 solo cotiza las modalidades 1, 2, 3, 4, 5 y 7 (lógica bimestral) y deriva 9, 10 y 12. La modalidad ${modalityId} pasa la validación, consume token + turnos + períodos y termina en 500 (el bot deriva a Admisión). Verificar que el modality_id que envía la tool sea el correcto según el mapeo oficial.`,
+      responsible: "config",
+    },
+    businessError(500)
   );
 }

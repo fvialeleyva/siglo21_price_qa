@@ -3,9 +3,10 @@
 Herramienta interna de Conversia para que el equipo de CS pueda diagnosticar por qué
 falló una consulta de precio del bot, sin depender de alguien técnico.
 
-Replica **`get-price-v4` de la rama `main`** del middleware `siglo21-price-proxy`
-(`pkg/services/pricing-service.go` → `HandleGetPriceV4`, `getPricesByModalityV4`,
-`FormatPriceResponseByModalityV4`):
+Replica **`get-price-v4`** del middleware `siglo21-price-proxy` tal como queda con el PR
+[Conversia-AI/conversia-legacy-lambdas#22](https://github.com/Conversia-AI/conversia-legacy-lambdas/pull/22)
+(rama `feat/v4-presencial-bimester`; `pkg/services/pricing-service.go` → `HandleGetPriceV4`,
+`getPricesByModalityV4`, `FormatPriceResponseByModalityV4`):
 
 ```
 Validación v4 → ¿Deriva a asesor (9, 10, 12)? → Token (client_credentials) → 1) Turnos (se usa el PRIMERO) → 2) Períodos → 3) Precios según la rama (en secuencia)
@@ -15,16 +16,19 @@ Ramas de precio (igual que el lambda):
 
 | Modalidad | Rama | Qué cotiza |
 |---|---|---|
-| 1, 2 (ED/EHD) | bimestral | Período activo por la tabla hardcodeada del lambda (regla HF-0113) + alternativos ocultos |
-| 3 PRESENCIAL · 4 PH Córdoba · 5 PH Río IV · 7 PH Río IV (ID previo) | octubre/marzo | Corte 17/10 23:59:59 UTC del año en curso. Antes: `2/26` (octubre, 3 pagos) + `1/27` (marzo, alternativa interna). Después: solo `1/27` (6 cuotas). Búsqueda por `name` exacto |
+| 1 EHD · 2 ED · 3 PRESENCIAL · 4 PH Córdoba · 5 PH Río IV · 7 PH Río IV (ID previo) | bimestral | Período activo por la tabla hardcodeada del lambda (regla HF-0113: el de inicio de clases más próximo cuya venta, incluida la extensión, cubre hoy) + el resto de períodos como alternativos ocultos. 6 cuotas → 3 cuotas, frase de período de cursado y meses de cursado. Las presenciales usan la misma tabla que la distancia |
 | 9 PRESENCIAL (ID previo) · 10 · 12 | deriva a asesor | 200 sin consultar a Siglo 21 |
 | cualquier otra | — | Consulta token, turnos y períodos y termina en 500 |
+
+Si Siglo 21 no devuelve el período activo de la tabla, el lambda cotiza el **primer período
+de la API** como respaldo y el texto muestra el nombre y los meses del período de la tabla
+(la herramienta lo marca como "período de respaldo"). La tabla termina el 14/03/2027.
 
 El `cau_id` se usa tal cual llega (sin overrides) y `schedule_id` no se usa.
 
 Para cada paso muestra si funcionó, el status HTTP, la URL exacta y la respuesta cruda de
-Siglo 21; para cada período devuelto, qué hace v4 con él (principal, alternativo, octubre,
-marzo o ignorado); y la **respuesta exacta que daría v4** (HTTP + body, con el mismo `output`
+Siglo 21; para cada período devuelto, qué hace v4 con él (principal, alternativo o
+ignorado); y la **respuesta exacta que daría v4** (HTTP + body, con el mismo `output`
 que arma el lambda) para comparar con la auditoría de la tool.
 
 Veredictos (con el HTTP equivalente del lambda):
@@ -32,17 +36,16 @@ Veredictos (con el HTTP equivalente del lambda):
 | Código | HTTP v4 | Cuándo |
 |---|---|---|
 | `OK` | 200 | Precio obtenido |
-| `OK_PARTIAL` | 200 | Precio obtenido, pero algún alternativo (ED/EHD) o marzo falló y el lambda lo omite en silencio |
-| `OCTOBER_PERIOD_MISSING` | 200 | Modalidades 3/4/5/7 antes del corte, sin precio de `2/26` pero con `1/27`: el lambda responde `"No se pudo determinar el tipo de arancel para esta modalidad."` (sin precio y sin instrucción de error) |
+| `OK_PARTIAL` | 200 | Precio obtenido, pero algún alternativo falló y el lambda lo omite en silencio |
 | `ADVISOR_MODALITY` | 200 | Modalidades 9, 10, 12 |
 | `INVALID_REQUEST_BODY` / `MISSING_REQUIRED_FIELD` | 400 | Body ilegible o falta `program_id` / `modality_id` / `cau_id` |
 | `AUTH_FAILED` | 401 | Falla el token |
 | `NO_SCHEDULES_AVAILABLE` / `NO_PERIODS_AVAILABLE` | 404 | Error o lista vacía en turnos / períodos |
-| `NO_ACTIVE_ED_EHD_PERIOD` | 500 | ED/EHD fuera de todas las ventanas de la tabla del lambda |
-| `PRICE_FETCH_ERROR` | 500 | Ningún precio utilizable (o falla el principal en ED/EHD) |
+| `NO_ACTIVE_ED_EHD_PERIOD` | 500 | Modalidad bimestral (1, 2, 3, 4, 5, 7) fuera de todas las ventanas de la tabla del lambda |
+| `PRICE_FETCH_ERROR` | 500 | Falla el precio del período principal |
 | `UNSUPPORTED_MODALITY` | 500 | Modalidad sin lógica de precio en v4 |
 
-La lógica pura (tablas, corte, formateador del `output`) está en `lib/get-price-v4.ts` y la
+La lógica pura (tabla de bimestres, formateador del `output`) está en `lib/get-price-v4.ts` y la
 ejecución contra Siglo 21 en `lib/siglo21.ts`. **Si cambia el lambda, hay que actualizar
 ambos.** `diagnose()` acepta `{ now }` opcional para probar con fechas fijas (la app usa
 siempre la hora actual, igual que el lambda).

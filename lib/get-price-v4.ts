@@ -1,7 +1,8 @@
 // Port fiel (lógica pura, sin red) de get-price-v4 del lambda siglo21-price-proxy,
-// rama main: pkg/services/pricing-service.go → HandleGetPriceV4,
-// getPricesByModalityV4, FormatPriceResponseByModalityV4 /
-// formatPriceResponseByModalityV3 (includeCourseCoverage = true) y helpers.
+// rama feat/v4-presencial-bimester (PR #22 de conversia-legacy-lambdas):
+// pkg/services/pricing-service.go → HandleGetPriceV4, getPricesByModalityV4,
+// FormatPriceResponseByModalityV4 / formatPriceResponseByModalityV3 (isV4 = true)
+// y helpers.
 //
 // Todo lo que depende del reloj recibe `now` como parámetro para poder probarlo
 // con fechas fijas; en producción la herramienta pasa `new Date()` (igual que el
@@ -54,9 +55,8 @@ export interface PriceData {
 }
 
 /**
- * Mismas claves que el map[string]*PriceData del lambda:
- * ED/EHD → "primary" y "alt::<clave>"; modalidades 3/4/5/7 →
- * "october_priority", "march_alternative" o "march_only".
+ * Mismas claves que el map[string]*PriceData del lambda en v4:
+ * "primary" y "alt::<clave>" (modalidades bimestrales 1, 2, 3, 4, 5, 7).
  */
 export type PriceDataMap = Record<string, PriceData>;
 
@@ -78,14 +78,12 @@ export const MODALITY_NAMES: Record<number, string> = {
 
 /** HandleGetPriceV4: derivan a asesor (200) sin consultar a Siglo 21. */
 export const ADVISOR_MODALITIES = new Set([9, 10, 12]);
-/** Lógica bimestral con tabla hardcodeada. */
-export const ED_EHD_MODALITIES = new Set([1, 2]);
-/** Lógica octubre/marzo (mapeo oficial 3, 4, 5 + la 7 por compatibilidad). */
-export const OCTOBER_MODALITIES = new Set([3, 4, 5, 7]);
-
-/** Nombres de período hardcodeados en getPricesByModalityV4 (búsqueda por `name` exacto). */
-export const OCTOBER_PERIOD_NAME = "2/26";
-export const MARCH_PERIOD_NAME = "1/27";
+/**
+ * v4BimesterModalities: lógica bimestral con tabla hardcodeada (regla HF-0113).
+ * Distancia (1, 2) + presenciales del mapeo oficial (3, 4, 5) + la 7 (ID previo),
+ * que usan la misma tabla de venta y extensión.
+ */
+export const BIMESTER_MODALITIES = new Set([1, 2, 3, 4, 5, 7]);
 
 export const ADVISOR_MESSAGE =
   "Indicale al estudiante que para conocer el arancel y las opciones de inscripción de esta modalidad debe comunicarse directamente con un asesor de Admisión. No inventes ni estimes precios. Ofrecé derivarlo al equipo de Admisión para que le brinden toda la información completa.";
@@ -94,7 +92,7 @@ export const DEFAULT_LLM_INSTRUCTION_ERROR =
   "[INSTRUCCIÓN DE ERROR — OBLIGATORIA]\n\nNo obtuviste información de precios o aranceles del sistema para esta carrera o modalidad.\n\n✅ CHECKLIST — LO QUE DEBES HACER (verificá cada punto antes de responder):\n□ Informale al estudiante que en este momento no tenés el dato disponible en el sistema.\n□ Ofrecele derivarlo al equipo de Admisión para obtener toda la información completa.\n□ Usá un tono empático, cálido y de acompañamiento.\n□ Cerrá con una pregunta de cierre, por ejemplo: \"¿Querés que te conecte con un asesor de Admisión que te ayude con esto?\"\n\n🚫 CHECKLIST — LO QUE JAMÁS DEBES HACER (verificá que ninguno aplique a tu respuesta):\n□ JAMÁS inventes, supongas, estimes ni calcules ningún precio, arancel, cuota o monto.\n□ JAMÁS menciones números relacionados a costos, aunque sean aproximados o referenciales.\n□ JAMÁS uses frases como \"debería costar\", \"aproximadamente\", \"suele ser\", \"normalmente cuesta\".\n□ JAMÁS menciones que no hay precios, fechas o turnos disponibles.\n□ JAMÁS menciones que el sistema falló, tuvo un error o no respondió.\n□ JAMÁS ofrezcas buscar el precio por otra vía ni estimes cuándo estará disponible.\n\n⚠️ VERIFICACIÓN FINAL — Antes de enviar tu respuesta, confirmá punto por punto:\n1. ¿Tu respuesta contiene algún número o monto económico? → Si SÍ: eliminalo completamente.\n2. ¿Tu respuesta menciona cuotas, aranceles o precios de alguna manera? → Si SÍ: eliminalo.\n3. ¿Tu respuesta ofrece derivar al equipo de Admisión? → Si NO: agregalo obligatoriamente.\n4. ¿Tu respuesta menciona un problema técnico, error de sistema o falta de datos? → Si SÍ: eliminalo.\n\n[FIN INSTRUCCIÓN DE ERROR]";
 
 /** Texto exacto que devuelve el formateador cuando ninguna rama arma bloque de precio. */
-export const UNDETERMINED_TARIFF_OUTPUT = "No se pudo determinar el tipo de arancel para esta modalidad.";
+const UNDETERMINED_TARIFF_OUTPUT = "No se pudo determinar el tipo de arancel para esta modalidad.";
 
 // ── Formato numérico idéntico a Go ────────────────────────────────────────────
 
@@ -120,7 +118,7 @@ export function goFixed(x: number, digits: number): string {
 
 const f2 = (x: number) => goFixed(x, 2);
 
-// ── Tabla ED/EHD (edEhdPeriods / edEhdPeriodOrder) ────────────────────────────
+// ── Tabla bimestral (edEhdPeriods / edEhdPeriodOrder) ─────────────────────────
 
 export interface BimesterPeriodInfo {
   fechaInicio: string; // inicio ventana de venta (dd/mm/yyyy)
@@ -178,17 +176,6 @@ export function buildEdEhdPeriodKey(periodName: string, subperiod: string): stri
   const b = periodName.slice(idx + 1);
   if (!a || !b) return "";
   return `${a}${subperiod}/${b}`;
-}
-
-// ── Corte octubre/marzo ───────────────────────────────────────────────────────
-
-/**
- * time.Date(now.Year(), 10, 17, 23, 59, 59, 0, time.UTC). El lambda corre en UTC
- * (sin TZ en template.yaml), así que el año es el año UTC. Antes del corte = now <= corte.
- */
-export function octoberCutoff(now: Date): { cutoff: Date; beforeCutoff: boolean } {
-  const cutoff = new Date(Date.UTC(now.getUTCFullYear(), 9, 17, 23, 59, 59, 0));
-  return { cutoff, beforeCutoff: now.getTime() <= cutoff.getTime() };
 }
 
 // ── Cobertura de cursado (V4) ─────────────────────────────────────────────────
@@ -317,32 +304,6 @@ function formatOptionalPromptLine(line: string): string {
   return line === "" ? "" : line + "\n";
 }
 
-function createPriceNote(p: PriceResponse): string {
-  let s = "";
-  s += "NOTAS ADICIONALES (NO MOSTRAR ESTA INFORMACIÓN AL USUARIO)\n";
-  s += "IMPORTANTE: La siguiente información es solo para contexto, no la incluyas en tu respuesta salvo que el usuario pregunte específicamente por estos detalles.\n";
-  s += "IMPORTANTE: TODOS los importes corresponden ÚNICAMENTE al período de cursado consultado, NO al costo total de la carrera completa. Esta herramienta NO dispone del costo total de la carrera: si el usuario pregunta cuánto cuesta toda la carrera, NUNCA presentes estos montos como tal; explicá que el arancel es por período y ofrecé derivar a un asesor de Admisión.\n";
-  s += "RESTRICCIÓN: NO ofrezcas enviar links directos de inscripción. Si el usuario quiere inscribirse, indica que el equipo de admisiones lo contactará.\n";
-  s += "------------------\n";
-  s += `Precio total del período de cursado (NO de la carrera completa): $${f2(p.total)}\n`;
-  s += `Descuento total del período de cursado: $${f2(p.totalDescuentos)}\n`;
-  s += `Precio lista total del período de cursado: $${f2(p.totalPrecioLista)}\n\n`;
-  s += "ÍTEMS INCLUIDOS\n";
-  s += "--------------\n";
-  for (const item of p.items) {
-    s += `• ${item.nombre}\n`;
-    s += `  Precio de lista: $${f2(item.precioLista)}\n`;
-    if (item.descuentos.length > 0) {
-      s += "  Descuentos aplicados:\n";
-      for (const d of item.descuentos) {
-        s += `    - ${d.motivo}: ${goFixed(d.porcentaje, 0)}% ($${f2(d.monto)})\n`;
-      }
-    }
-    s += "\n";
-  }
-  return s;
-}
-
 function createPriceNoteV2(p: PriceResponse): string {
   let s = "";
   s += "[INFORMACIÓN DETALLADA DEL PRECIO (Referencia interna — NO mostrar salvo pedido explícito)\n";
@@ -383,7 +344,7 @@ function buildPaymentAndRestrictionsContext(req: V4Request): string {
   return s;
 }
 
-/** Alternativos ED/EHD que el formateador MUESTRA: solo claves de la tabla, en su orden. */
+/** Alternativos que el formateador MUESTRA: solo claves de la tabla, en su orden. */
 export function shownEdEhdAlternatives(priceData: PriceDataMap): { key: string; pd: PriceData }[] {
   const out: { key: string; pd: PriceData }[] = [];
   for (const key of ED_EHD_PERIOD_ORDER) {
@@ -430,8 +391,8 @@ const DASH = "------------------------------------------------------------------
 export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: number, req: V4Request, now: Date): string {
   const llmInstruction = req.llmInstruction;
 
-  // ── ED EHD ──
-  if (ED_EHD_MODALITIES.has(modalityId)) {
+  // ── Lógica bimestral (1, 2, 3, 4, 5, 7) ──
+  if (BIMESTER_MODALITIES.has(modalityId)) {
     const primaryData = priceData["primary"];
     if (!primaryData) return "No se pudo obtener el precio del período activo.";
 
@@ -503,85 +464,6 @@ export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: numbe
     return userMessage + criticalRules + ctx;
   }
 
-  // ── Octubre / marzo (3, 4, 5, 7) ──
-  if (OCTOBER_MODALITIES.has(modalityId)) {
-    const { beforeCutoff } = octoberCutoff(now);
-    if (beforeCutoff) {
-      const octoberPrice = priceData["october_priority"];
-      if (octoberPrice) {
-        const amount3Payments = round2(octoberPrice.price.total / 3);
-        const userMessage =
-          "[INSTRUCTION: Use the conversational template below. Personalize with user's name and goals from previous context.]\n\n" +
-          "Mirá, {nombre}. Con lo que me contaste —{impacto esperado del usuario}—, tiene sentido que aproveches el próximo inicio en octubre 2026. " +
-          `El bimestre es $${f2(amount3Payments)} en 3 pagos con VISA o Mastercard e incluye matrícula, arancel del bimestre, derechos de examen, materiales digitales y acceso a biblioteca. ` +
-          "🚀 Octubre 2026 es tu momento para {objetivo del usuario} en la universidad más elegida de Argentina. " +
-          "¿Te resulta viable con cuotas, o preferís otra forma de pago?";
-
-        let c = "";
-        c += "\n\n" + SEP + "🤖 INSTRUCCIONES CRÍTICAS PARA EL AGENTE DE IA\n" + SEP + "\n";
-        c += llmInstruction + "\n\n";
-        c += "📋 INFORMACIÓN DE DETALLES (Referencia interna):\n" + DASH;
-        c += buildTodayLine(now);
-        c += createPriceNote(octoberPrice.price);
-
-        const marchPrice = priceData["march_alternative"];
-        if (marchPrice) {
-          c += "\n📅 INFORMACIÓN ADICIONAL - OPCIÓN MARZO 2027:\n";
-          c += "(Usar SOLO si el usuario rechaza la opción de octubre)\n";
-          c += DASH;
-          c += `Precio en 6 cuotas para marzo: $${f2(round2(marchPrice.price.total / 6))}\n`;
-          c += "Usar el mismo formato conversacional si ofreces esta alternativa.\n";
-          c += createPriceNote(marchPrice.price);
-        }
-
-        c += "\n🎯 ESTRATEGIA DE CONVERSACIÓN:\n" + DASH;
-        c += "1. SIEMPRE presenta PRIMERO la opción de OCTUBRE 2026\n";
-        c += "2. NO menciones marzo 2027 a menos que el usuario rechace octubre\n";
-        c += "3. Si el usuario dice que no puede empezar en octubre, ENTONCES ofrece marzo\n";
-        c += "4. Enfatiza las ventajas de empezar AHORA\n\n";
-        c += buildPaymentAndRestrictionsContext(req);
-        c += SEP;
-
-        return userMessage + c;
-      }
-    } else {
-      const marchPrice = priceData["march_only"];
-      if (marchPrice) {
-        const nCuotas = 6;
-        const amount6 = round2(marchPrice.price.total / nCuotas);
-        const userMessage =
-          "[INSTRUCTION:\n\nUsa el siguiente **Bloque de Precio**:\n\n" +
-          "Mirá, {nombre}. Con lo que me contaste {impacto esperado del usuario}, tiene sentido que aproveches el próximo inicio en {periodo}.\n" +
-          `**Hoy podés inscribirte y abonar el cuatrimestre completo en ${nCuotas} cuotas de $${f2(amount6)} con tarjeta VISA o MASTERCARD.**\n` +
-          "Este arancel incluye matrícula, el arancel del cuatrimestre, derechos de examen, materiales de estudio digitales y acceso a biblioteca.\n" +
-          "🚀 Marzo 2027 es tu momento para {objetivo del usuario} en la universidad más elegida de Argentina. **¿Te parece viable esta forma de pago?**\n\n";
-
-        const criticalRules =
-          "[REGLAS CRÍTICAS (OBLIGATORIAS):\n" +
-          "- Variables opcionales ({nombre}, {impacto esperado del usuario}, {objetivo del usuario}): si no están disponibles, reformula mínimamente para mantener fluidez y coherencia, sin inventar contenido ni mostrar llaves.\n" +
-          `- La **oración del precio** es inmutable: "**Hoy podés inscribirte y abonar el cuatrimestre completo en ${nCuotas} cuotas de $${f2(amount6)} con tarjeta VISA o MASTERCARD.**". No la modifiques, no la parafrasees ni alteres su orden. Usa siempre "cuotas".\n` +
-          "- **Nunca** muestres llaves {} ni nombres de variables en la respuesta.\n" +
-          "- No hagas cálculos ni expliques precios/beneficios adicionales salvo pedido explícito del usuario.\n" +
-          "- Si el usuario pregunta por medios de pago, transferencias, bancos, cuotas sin interés, tasas o promociones, **invoca la Tool de Admisión › Matrícula y Medios de Pago de la Carrera** y entrega **exactamente** su resultado (no inventes medios de pago, bancos, cuotas ni tasas).\n" +
-          "- Prohibido decir que las matrículas/aranceles se pueden pagar por transferencia bancaria.\n" +
-          "- Si el usuario pregunta por medios de pago, bancos, cuotas sin interés, tasas o promociones, **invoca la Tool de Admisión › Matrícula y Medios de Pago de la Carrera** y entrega **exactamente** su resultado (no inventes bancos, cuotas ni tasas).\n" +
-          "- Si el usuario expresa objeción económica al precio, o muestra dudas/inseguridad o intención de postergar por motivos económicos (con interés real en estudiar), **activa de inmediato el Protocolo de Beneficios Económicos**.\n" +
-          "- Después de presentar el precio, **actualiza el custom field con key \"interest_qualification_reason\" del deal con el valor 55**.]\n\n";
-
-        let c = "";
-        if (llmInstruction !== "") {
-          c += "\n\n" + SEP + "🤖 CONTEXTO PARA EL AGENTE DE IA\n" + SEP + "\n";
-          c += llmInstruction + "\n\n";
-        }
-        c += "📋 INFORMACIÓN DE DETALLES (Referencia interna):\n" + DASH;
-        c += buildTodayLine(now);
-        c += createPriceNoteV2(marchPrice.price);
-        c += buildPaymentAndRestrictionsContext(req);
-
-        return userMessage + criticalRules + c;
-      }
-    }
-  }
-
+  // En v4 ninguna otra modalidad llega al formateador (getPricesByModalityV4 corta con 500).
   return UNDETERMINED_TARIFF_OUTPUT;
 }
