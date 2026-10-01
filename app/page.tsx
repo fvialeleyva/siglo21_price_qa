@@ -100,6 +100,7 @@ const VERDICT_STYLES: Record<string, { badge: string; card: string; label: strin
   NO_SCHEDULES_AVAILABLE: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "❌ SIN TURNOS" },
   NO_PERIODS_AVAILABLE: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "❌ SIN PERÍODOS" },
   NO_ACTIVE_ED_EHD_PERIOD: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "📅 SIN PERÍODO ACTIVO EN LA TABLA" },
+  NO_ACTIVE_OR_NEXT_PERIOD: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "📅 SIGLO 21 NO DEVOLVIÓ EL ACTIVO NI UNO POSTERIOR" },
   PRICE_FETCH_ERROR: { badge: "bg-red-600", card: "border-red-200 bg-red-50", label: "❌ FALLÓ PRECIO" },
 };
 
@@ -312,6 +313,7 @@ function QuoteMessage({ q }: { q: Quote }) {
       <p className="text-sm">
         Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en {q.periodName}.
       </p>
+      {q.nextPeriodNotice && <p className="text-sm mt-1 font-semibold">{q.nextPeriodNotice}</p>}
       {q.courseCoverageLine && <p className="text-sm mt-1">{q.courseCoverageLine}</p>}
       <PriceSentence>
         Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de {money(q.cuota6)} (dependiendo
@@ -335,17 +337,20 @@ function QuoteMessage({ q }: { q: Quote }) {
         {q.alternatives.length > 0 && (
           <p>
             📅 {q.alternatives.length} período(s) alternativo(s) que ofrece{" "}
-            <span className="font-semibold text-gray-700">solo si el estudiante rechaza este</span>:{" "}
+            <span className="font-semibold text-gray-700">
+              solo si el estudiante rechaza este o pregunta por otro inicio / el próximo año
+            </span>
+            :{" "}
             {q.alternatives
               .map((a) => `${a.name} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
               .join(" · ")}
             .
           </p>
         )}
-        {q.fallbackPeriod && (
+        {q.nextPeriodNotice && (
           <p className="text-amber-700">
-            ⚠️ El monto es del período {q.fallbackPeriod} (respaldo: Siglo 21 no devolvió {q.periodKey}), pero el texto
-            dice {q.periodName}.
+            ℹ️ Siglo 21 no devolvió el período activo {q.activePeriodKey}: se cotiza el próximo período disponible (
+            {q.periodKey}) y el agente no ofrece el inicio de {q.activePeriodKey}.
           </p>
         )}
       </div>
@@ -480,7 +485,8 @@ const BIMESTER_RULES = [
   "Aclara siempre qué meses de cursado abarca el período que presenta.",
   "Ofrece primero 6 cuotas fijas; 3 cuotas solo si hay objeción. Nunca más por iniciativa propia.",
   "Los montos son del período de cursado activo, no de la carrera completa.",
-  "Alternativos: solo si el estudiante rechaza el principal, de a uno por vez.",
+  "Alternativos: solo si el estudiante rechaza el principal o pregunta por otro inicio / el próximo año, de a uno por vez.",
+  "Si Siglo 21 no devolvió el período activo, presenta la aclaración del próximo período disponible y no ofrece el activo.",
   "Medios de pago / bancos / promociones: invoca la Tool de Admisión y entrega su resultado tal cual.",
   "Prohibido mencionar transferencia bancaria. Objeción económica: Protocolo de Beneficios Económicos.",
   "Al entregar el precio, marca el CRM: interest_qualification_reason = 55.",
@@ -538,7 +544,11 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
             <>
               <ContextAmounts
                 title={`📋 Período principal — ${q.periodName}`}
-                subtitle={`Activo según la tabla del lambda: ${q.periodKey}${q.fallbackPeriod ? ` · monto del período de respaldo ${q.fallbackPeriod}` : ""}`}
+                subtitle={
+                  q.periodKey === q.activePeriodKey
+                    ? `Activo según la tabla del lambda: ${q.periodKey}`
+                    : `Próximo período disponible: ${q.periodKey} (el activo según la tabla, ${q.activePeriodKey}, no vino)`
+                }
                 tone="primary"
                 rows={[
                   ...(q.coverageLabel ? [["Meses de cursado", q.coverageLabel] as [string, string]] : []),
@@ -551,7 +561,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
                 <ContextAmounts
                   key={a.key}
                   title={`📅 Alternativa ${i + 1} — ${a.name} (${a.key})`}
-                  subtitle="Oculta: solo si el estudiante rechaza el principal."
+                  subtitle="Oculta: solo si el estudiante rechaza el principal o pregunta por otro inicio / el próximo año."
                   tone="alt"
                   rows={[
                     ...(a.coverageLabel ? [["Meses de cursado", a.coverageLabel] as [string, string]] : []),

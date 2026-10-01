@@ -1,5 +1,5 @@
 // Réplica de get-price-v4 del lambda siglo21-price-proxy (rama
-// feat/v4-presencial-bimester, PR #22 de conversia-legacy-lambdas) con fines de
+// feat/v4-next-period-fallback, sobre PR #22 de conversia-legacy-lambdas) con fines de
 // diagnóstico: en lugar de retornar solo el output o un error, registra cada
 // paso (URL, status HTTP, respuesta cruda, duración), qué hace v4 con cada
 // período que devuelve Siglo 21 y la respuesta exacta (HTTP + body) que daría
@@ -17,9 +17,11 @@ import {
   MODALITY_NAMES,
   buildCourseCoverageLine,
   buildEdEhdPeriodKey,
+  buildNextPeriodNotice,
   buildPeriodCoverageLabel,
   formatPriceResponseV4,
   getActiveEdEhdPeriodKey,
+  resolveV4PrimaryPeriod,
   round2,
   shownEdEhdAlternatives,
   type PriceData,
@@ -112,6 +114,7 @@ export type VerdictCode =
   | "NO_SCHEDULES_AVAILABLE"
   | "NO_PERIODS_AVAILABLE"
   | "NO_ACTIVE_ED_EHD_PERIOD"
+  | "NO_ACTIVE_OR_NEXT_PERIOD"
   | "PRICE_FETCH_ERROR"
   | "UNSUPPORTED_MODALITY";
 
@@ -139,8 +142,10 @@ export interface Quote {
   cuota3: number;
   coverageLabel: string;
   courseCoverageLine: string;
-  /** El período cotizado no coincide con la clave activa (respaldo: primer período de la API) */
-  fallbackPeriod?: string;
+  /** Clave del período activo según la tabla (difiere de periodKey si se cotiza el próximo) */
+  activePeriodKey: string;
+  /** Aclaración que agrega v4 cuando el activo no vino y se cotiza el próximo período ("" si no aplica) */
+  nextPeriodNotice: string;
   alternatives: { key: string; name: string; total: number; cuota6: number; cuota3: number; coverageLabel: string }[];
 }
 
@@ -155,6 +160,8 @@ export interface DiagnosisResult {
   turnoCode?: string;
   turnoName?: string;
   /** Clave del período activo según la tabla hardcodeada del lambda (rama bimestral) */
+  activePeriodKey?: string;
+  /** Período principal que cotiza v4: el activo o, si no vino, el próximo de la tabla que sí vino */
   primaryPeriodKey?: string;
   primaryPeriodName?: string;
   quote?: Quote;
@@ -612,7 +619,7 @@ export async function diagnose(
     status: branch === "unsupported" ? "warning" : "ok",
     detail:
       branch === "bimester"
-        ? `Modalidad ${modalityId} (${modalityName}) — rama bimestral (1, 2, 3, 4, 5, 7): período activo por tabla hardcodeada + alternativos ocultos.`
+        ? `Modalidad ${modalityId} (${modalityName}) — rama bimestral (1, 2, 3, 4, 5, 7): período activo por tabla hardcodeada (o, si Siglo 21 no lo devuelve, el próximo de la tabla que sí vino) + alternativos ocultos.`
         : `La modalidad ${modalityId} (${modalityName}) no tiene lógica de precio en v4. El lambda NO la rechaza: igual pide token, turnos y períodos, y termina en 500.`,
   });
 
@@ -872,25 +879,63 @@ export async function diagnose(
     }
 
     const activeInfo = ED_EHD_PERIODS[activeKey];
-    extra.primaryPeriodKey = activeKey;
-    extra.primaryPeriodName = activeInfo?.nombre;
+    const activeName = activeInfo?.nombre || activeKey;
+    extra.activePeriodKey = activeKey;
 
-    let primaryIdx = periods.findIndex((r) => r.key === activeKey);
-    const isFallback = primaryIdx === -1;
-    if (isFallback) primaryIdx = 0;
+    // resolveV4PrimaryPeriod: el activo si vino; si no, el primero posterior de la tabla que vino.
+    const resolved = resolveV4PrimaryPeriod(activeKey, periods);
+    if (!resolved) {
+      const activeIdx = ED_EHD_PERIOD_ORDER.indexOf(activeKey);
+      for (const row of periods) {
+        const idx = row.key ? ED_EHD_PERIOD_ORDER.indexOf(row.key) : -1;
+        row.useLabel = !row.key
+          ? "Ignorado: no se puede armar la clave (name/subperiod)"
+          : idx === -1
+            ? `Ignorado: ${row.key} no está en la tabla del lambda`
+            : idx < activeIdx
+              ? `Ignorado: anterior al período activo ${activeKey}`
+              : "Ignorado";
+      }
+      const outsideTable = periods.some((r) => !r.key || !ED_EHD_PERIOD_ORDER.includes(r.key));
+      steps.push({
+        id: "periodo-activo",
+        title: "Selección del período principal (tabla del lambda)",
+        status: "fail",
+        detail: `La tabla indica que el activo es ${activeKey} (${activeName}), pero Siglo 21 no devolvió ese período ni uno posterior de la tabla (${ED_EHD_PERIOD_ORDER.slice(Math.max(activeIdx, 0)).join(", ")}). El lambda corta acá con 500 (no consulta precios).`,
+      });
+      return finish(
+        {
+          code: "NO_ACTIVE_OR_NEXT_PERIOD",
+          httpEquivalent: 500,
+          title: "Siglo 21 no devolvió el período activo ni uno posterior",
+          explanation: `get-price-v4 cotiza el período activo de su tabla (${activeKey}, ${activeName}) o, si no vino, el próximo de la tabla que sí vino. Siglo 21 devolvió solo ${periods.map((r) => r.key || `${r.name || "?"}-${r.subPeriod || "?"}`).join(", ")}${outsideTable ? " (incluye períodos fuera de la tabla del lambda)" : ""}, así que no cotiza un período desconocido: responde 500 con la instrucción de error y el bot deriva a Admisión. ${outsideTable ? "Si Siglo 21 ya abrió un período nuevo, hay que cargarlo en la tabla del lambda." : "Verificar con Siglo 21 si el período activo debería estar habilitado para esta carrera/modalidad/CAU."}`,
+          responsible: outsideTable ? "middleware" : "siglo21",
+        },
+        businessError(500)
+      );
+    }
+
+    const primaryIdx = resolved.index;
+    const primaryKey = resolved.key;
+    const isNextPeriod = primaryKey !== activeKey;
+    const primaryInfo = ED_EHD_PERIODS[primaryKey];
+    const primaryName = primaryInfo?.nombre || primaryKey;
+    const nextPeriodNotice = buildNextPeriodNotice(primaryKey, activeKey);
+    extra.primaryPeriodKey = primaryKey;
+    extra.primaryPeriodName = primaryInfo?.nombre;
     const primaryRow = periods[primaryIdx];
     steps.push({
       id: "periodo-activo",
-      title: "Selección del período activo (tabla del lambda)",
-      status: isFallback ? "warning" : "ok",
-      detail: isFallback
-        ? `La tabla indica que el activo es ${activeKey} (${activeInfo?.nombre}), pero Siglo 21 NO devolvió ese período. El lambda cotiza como respaldo el PRIMER período de la lista (${primaryRow.name}-${primaryRow.subPeriod}) y lo presenta con el nombre, fechas y meses de ${activeKey}: monto de un período, textos de otro.`
-        : `Período activo según la tabla hardcodeada (regla HF-0113): ${activeKey} (${activeInfo?.nombre}), ventana ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""}. Es el precio que ve el estudiante; el resto queda como alternativo oculto.`,
+      title: "Selección del período principal (tabla del lambda)",
+      status: isNextPeriod ? "warning" : "ok",
+      detail: isNextPeriod
+        ? `La tabla indica que el activo es ${activeKey} (${activeName}), pero Siglo 21 NO devolvió ese período. v4 cotiza el próximo período de la tabla que sí vino: ${primaryKey} (${primaryName}), con sus propios nombre, fechas y meses, y agrega la aclaración: "${nextPeriodNotice}"`
+        : `Período activo según la tabla hardcodeada (regla HF-0113): ${activeKey} (${activeName}), ventana ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""}. Es el precio que ve el estudiante; el resto queda como alternativo oculto.`,
     });
 
     primaryRow.use = "primary";
-    primaryRow.useLabel = isFallback
-      ? `Principal por RESPALDO (no coincide con ${activeKey})`
+    primaryRow.useLabel = isNextPeriod
+      ? `Principal: próximo período disponible (no vino el activo ${activeKey})`
       : "Principal (el que ve el estudiante)";
     const primaryPd = await fetchPrice(primaryIdx);
     if (!primaryPd) {
@@ -940,7 +985,7 @@ export async function diagnose(
       }
       priceData[ALT_PERIOD_PREFIX + row.key] = pd;
       row.useLabel = shown
-        ? "Alternativo oculto (solo si rechaza el principal)"
+        ? "Alternativo oculto (si rechaza el principal o pregunta por otro inicio)"
         : `Cotizado pero NO se muestra (${row.key} no está en la tabla del lambda)`;
     }
 
@@ -957,14 +1002,15 @@ export async function diagnose(
     const cuota6 = round2(primaryPd.price.total / 6);
     extra.quote = {
       kind: "bimester",
-      periodKey: activeKey,
-      periodName: activeInfo?.nombre || activeKey,
+      periodKey: primaryKey,
+      periodName: primaryName,
       total: primaryPd.price.total,
       cuota6,
       cuota3: round2(primaryPd.price.total / 3),
-      coverageLabel: buildPeriodCoverageLabel(activeKey, primaryPd),
-      courseCoverageLine: buildCourseCoverageLine(programId, activeKey, primaryPd),
-      fallbackPeriod: isFallback ? `${primaryRow.name}-${primaryRow.subPeriod}` : undefined,
+      coverageLabel: buildPeriodCoverageLabel(primaryKey, primaryPd),
+      courseCoverageLine: buildCourseCoverageLine(programId, primaryKey, primaryPd),
+      activePeriodKey: activeKey,
+      nextPeriodNotice,
       alternatives: alts.map((a) => ({
         key: a.key,
         name: ED_EHD_PERIODS[a.key]?.nombre || a.key,
@@ -982,19 +1028,19 @@ export async function diagnose(
             code: "OK_PARTIAL",
             httpEquivalent: 200,
             title: "Precio obtenido, pero con alternativos omitidos",
-            explanation: `El bot SÍ recibió precio de ${activeInfo?.nombre ?? activeKey} (6 cuotas de ${money(cuota6)}), pero ${partialFailures} período(s) alternativos fallaron en Siglo 21 y se omitieron en silencio.${
-              isFallback ? ` Ojo: el monto es del período ${primaryRow.name}-${primaryRow.subPeriod} (respaldo), no de ${activeKey}.` : ""
+            explanation: `El bot SÍ recibió precio de ${primaryName} (6 cuotas de ${money(cuota6)}), pero ${partialFailures} período(s) alternativos fallaron en Siglo 21 y se omitieron en silencio.${
+              isNextPeriod ? ` Ojo: Siglo 21 no devolvió el activo ${activeKey}, así que se cotiza el próximo período disponible (${primaryKey}).` : ""
             }`,
             responsible: "siglo21",
           }
         : {
             code: "OK",
             httpEquivalent: 200,
-            title: isFallback ? "Precio obtenido — con período de respaldo" : "Todo funcionó correctamente",
-            explanation: isFallback
-              ? `get-price-v4 responde 200, pero Siglo 21 no devolvió el período activo ${activeKey}: el monto (${money(primaryPd.price.total)}) es del período ${primaryRow.name}-${primaryRow.subPeriod} y el texto dice ${activeInfo?.nombre}. Revisar si la tabla del lambda está desactualizada o si falta el período en Siglo 21.`
-              : `get-price-v4 responde 200 con precio de ${activeInfo?.nombre ?? activeKey}: 6 cuotas de ${money(cuota6)}${alts.length ? ` y ${alts.length} alternativo(s) oculto(s)` : ""}. Si el bot no dio precio en la conversación, el problema no fue esta consulta en este momento (pudo ser temporal o de otro punto del flujo).`,
-            responsible: isFallback ? "middleware" : "nadie",
+            title: isNextPeriod ? "Precio obtenido — próximo período disponible" : "Todo funcionó correctamente",
+            explanation: isNextPeriod
+              ? `get-price-v4 responde 200 con precio de ${primaryName} (${primaryKey}): 6 cuotas de ${money(cuota6)}. Siglo 21 no devolvió el período activo ${activeKey} (${activeName}) para esta carrera/modalidad, así que v4 cotiza el próximo período disponible y el bot lo aclara ("${nextPeriodNotice}"). No es una falla.`
+              : `get-price-v4 responde 200 con precio de ${primaryName}: 6 cuotas de ${money(cuota6)}${alts.length ? ` y ${alts.length} alternativo(s) oculto(s)` : ""}. Si el bot no dio precio en la conversación, el problema no fue esta consulta en este momento (pudo ser temporal o de otro punto del flujo).`,
+            responsible: isNextPeriod ? "comportamiento_esperado" : "nadie",
           },
       { httpStatus: 200, body: { output } }
     );

@@ -1,5 +1,5 @@
 // Port fiel (lógica pura, sin red) de get-price-v4 del lambda siglo21-price-proxy,
-// rama feat/v4-presencial-bimester (PR #22 de conversia-legacy-lambdas):
+// rama feat/v4-next-period-fallback (sobre PR #22 de conversia-legacy-lambdas):
 // pkg/services/pricing-service.go → HandleGetPriceV4, getPricesByModalityV4,
 // FormatPriceResponseByModalityV4 / formatPriceResponseByModalityV3 (isV4 = true)
 // y helpers.
@@ -178,6 +178,51 @@ export function buildEdEhdPeriodKey(periodName: string, subperiod: string): stri
   return `${a}${subperiod}/${b}`;
 }
 
+/**
+ * resolveV4PrimaryPeriod: elige el período principal de V4 entre los que devolvió
+ * la API: el activo de la tabla si vino; si no, el primero posterior al activo
+ * (en orden de ED_EHD_PERIOD_ORDER) que sí vino. Ej: activo 2B/26 y la API
+ * devuelve solo 1/27 A → 1A/27. Si no hay ninguno de esos, devuelve null (se
+ * deriva). `index` es la posición del primer período de la API con esa clave.
+ */
+export function resolveV4PrimaryPeriod(
+  activeKey: string,
+  periods: { name: string; subPeriod: string }[]
+): { index: number; key: string } | null {
+  const byKey = new Map<string, number>();
+  periods.forEach((p, idx) => {
+    const key = buildEdEhdPeriodKey(p.name, p.subPeriod);
+    if (key !== "" && !byKey.has(key)) byKey.set(key, idx);
+  });
+  const activeIdx = ED_EHD_PERIOD_ORDER.lastIndexOf(activeKey);
+  if (activeIdx === -1) return null;
+  for (const key of ED_EHD_PERIOD_ORDER.slice(activeIdx)) {
+    const index = byKey.get(key);
+    if (index !== undefined) return { index, key };
+  }
+  return null;
+}
+
+/** periodCycle: "2B/26" → "26". */
+function periodCycle(periodKey: string): string {
+  const idx = periodKey.lastIndexOf("/");
+  return idx === -1 ? "" : periodKey.slice(idx + 1);
+}
+
+/**
+ * buildNextPeriodNotice: aclaración que se muestra cuando V4 cotiza un período
+ * posterior al activo porque la API no devolvió el activo. Si el período es de
+ * otro ciclo se aclara que es para el próximo año. "" si es el activo.
+ */
+export function buildNextPeriodNotice(primaryKey: string, activeKey: string): string {
+  if (primaryKey === "" || primaryKey === activeKey) return "";
+  const nombre = ED_EHD_PERIODS[primaryKey]?.nombre || primaryKey;
+  if (periodCycle(primaryKey) !== periodCycle(activeKey)) {
+    return `Para esta carrera y modalidad, la inscripción disponible es para el próximo año: las clases comienzan en ${nombre}.`;
+  }
+  return `Para esta carrera y modalidad, el próximo inicio disponible es en ${nombre}.`;
+}
+
 // ── Cobertura de cursado (V4) ─────────────────────────────────────────────────
 
 const PROGRAM_DEGREE_TYPES: Record<number, "licenciatura" | "tecnicatura"> = {
@@ -300,6 +345,11 @@ export function buildTodayLine(now: Date): string {
   return `Fecha de HOY: ${SPANISH_WEEKDAYS[art.getUTCDay()]} ${dd}/${mm}/${yyyy} — usá esta fecha como única referencia temporal para cualquier cálculo o mención de plazos, inicios de clases o períodos.\n`;
 }
 
+/** boldOptional: envuelve el texto en negrita markdown; "" si no hay texto. */
+function boldOptional(text: string): string {
+  return text === "" ? "" : `**${text}**`;
+}
+
 function formatOptionalPromptLine(line: string): string {
   return line === "" ? "" : line + "\n";
 }
@@ -359,9 +409,10 @@ function buildEdEhdAlternativesContext(priceData: PriceDataMap): string {
   if (alts.length === 0) return "";
   let b = "";
   b += "\n\n═══════════════════════════════════════════════════════════════\n";
-  b += "📅 PERÍODOS ALTERNATIVOS (Referencia interna — NO mostrar salvo que el usuario rechace el período principal):\n";
+  // Encabezado de V4 (isV4 = true en el lambda): también si pregunta por otro inicio / el próximo año.
+  b += "📅 PERÍODOS ALTERNATIVOS (Referencia interna — NO mostrar salvo que el usuario rechace el período principal o pregunte por otro inicio / el próximo año):\n";
   b += "═══════════════════════════════════════════════════════════════\n";
-  b += "Usar SOLO si el estudiante no puede o no quiere el período principal. Ofrecé uno a la vez, con el mismo formato del bloque de precio principal.\n";
+  b += "Usar SOLO si el estudiante no puede o no quiere el período principal, o si pregunta explícitamente por otro inicio o por el próximo año (en ese caso, dale el precio del período que pide aunque el principal siga disponible). Ofrecé uno a la vez, con el mismo formato del bloque de precio principal.\n";
   b += "Al ofrecer cualquiera de estas opciones, aclarale SIEMPRE al estudiante qué meses de cursado abarca ese período (dato \"Meses de cursado\" de cada opción).\n\n";
   for (const alt of alts) {
     const info = ED_EHD_PERIODS[alt.key];
@@ -396,7 +447,11 @@ export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: numbe
     const primaryData = priceData["primary"];
     if (!primaryData) return "No se pudo obtener el precio del período activo.";
 
-    const primaryKey = getActiveEdEhdPeriodKey(now);
+    // V4 puede cotizar un período posterior al activo (ver resolveV4PrimaryPeriod):
+    // la clave sale del período cotizado.
+    const activeKey = getActiveEdEhdPeriodKey(now);
+    const primaryKey = buildEdEhdPeriodKey(primaryData.periodName, primaryData.subPeriod) || activeKey;
+    const nextPeriodNotice = buildNextPeriodNotice(primaryKey, activeKey);
     const primaryInfo = ED_EHD_PERIODS[primaryKey];
 
     const cuota6 = round2(primaryData.price.total / 6);
@@ -408,17 +463,23 @@ export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: numbe
     const userMessage =
       "[INSTRUCTION:\n\nUsa el siguiente **Bloque de Precio**:\n\n" +
       `Mirá, {nombre}. Con lo que me contaste —{impacto esperado del usuario}—, tiene sentido que aproveches el próximo inicio en ${periodDisplayName}.\n` +
+      formatOptionalPromptLine(boldOptional(nextPeriodNotice)) +
       formatOptionalPromptLine(courseCoverageLine) +
       `${pricePhrase}\n` +
       "Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y materiales de estudio digitales y acceso a biblioteca.\n" +
       "**¿Te parece viable esta forma de pago?**\n\n";
 
-    const courseCoverageRule = courseCoverageLine
+    let courseCoverageRule = courseCoverageLine
       ? `- La **oración del período de cursado** es inmutable: "${courseCoverageLine}". No la modifiques ni parafrasees.\n`
       : "";
+    if (nextPeriodNotice !== "") {
+      const activeName = ED_EHD_PERIODS[activeKey]?.nombre || activeKey;
+      courseCoverageRule += `- La **aclaración del período** es inmutable y obligatoria: "${nextPeriodNotice}". No la omitas, modifiques ni parafrasees.\n`;
+      courseCoverageRule += `- El inicio de ${activeName} **no está disponible** para esta carrera y modalidad: no lo ofrezcas ni lo menciones como opción.\n`;
+    }
     const altRule =
       shownEdEhdAlternatives(priceData).length > 0
-        ? "- Existen **otros períodos de inicio disponibles** como alternativa. Ofrecelos **solo** si el estudiante rechaza el período principal, de a uno por vez y con el mismo formato del bloque de precio. Los detalles están al final, en la sección \"PERÍODOS ALTERNATIVOS\" del contexto interno.\n"
+        ? "- Existen **otros períodos de inicio disponibles** como alternativa. Ofrecelos **solo** si el estudiante rechaza el período principal **o si pregunta explícitamente por otro inicio o por el próximo año** (ej: \"¿y para marzo?\", \"¿cuánto sale el año que viene?\"); en ese caso dale el precio del período que pide aunque el principal siga disponible. De a uno por vez y con el mismo formato del bloque de precio. Los detalles están al final, en la sección \"PERÍODOS ALTERNATIVOS\" del contexto interno.\n"
         : "";
     const coverageMonthsRule =
       "- Siempre que presentes un período (el principal o un alternativo), aclarale al estudiante **qué meses de cursado abarca** (ej: \"este período cubre de octubre a diciembre 2026\"). Usá los meses que figuran en el contexto interno de cada período; si no figuran, no los inventes.\n";
@@ -448,6 +509,9 @@ export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: numbe
     ctx += "📋 DATOS DEL PERÍODO ACTIVO (no mostrar al usuario):\n" + DASH;
     ctx += buildTodayLine(now);
     ctx += `Período: ${primaryKey}\n`;
+    if (nextPeriodNotice !== "") {
+      ctx += `Nota: el período vigente según calendario (${activeKey}) no vino para esta carrera y modalidad; se cotiza el próximo período disponible.\n`;
+    }
     if (primaryInfo) {
       ctx += `Inicio de clases: ${primaryInfo.inicioClases}\n`;
       ctx += primaryInfo.fechaExtension

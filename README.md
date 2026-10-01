@@ -5,8 +5,9 @@ falló una consulta de precio del bot, sin depender de alguien técnico.
 
 Replica **`get-price-v4`** del middleware `siglo21-price-proxy` tal como queda con el PR
 [Conversia-AI/conversia-legacy-lambdas#22](https://github.com/Conversia-AI/conversia-legacy-lambdas/pull/22)
-(rama `feat/v4-presencial-bimester`; `pkg/services/pricing-service.go` → `HandleGetPriceV4`,
-`getPricesByModalityV4`, `FormatPriceResponseByModalityV4`):
+más la rama `feat/v4-next-period-fallback` (selección del próximo período disponible;
+`pkg/services/pricing-service.go` → `HandleGetPriceV4`, `getPricesByModalityV4`,
+`resolveV4PrimaryPeriod`, `FormatPriceResponseByModalityV4`):
 
 ```
 Validación v4 → ¿Deriva a asesor (9, 10, 12)? → Token (client_credentials) → 1) Turnos (se usa el PRIMERO) → 2) Períodos → 3) Precios según la rama (en secuencia)
@@ -16,13 +17,27 @@ Ramas de precio (igual que el lambda):
 
 | Modalidad | Rama | Qué cotiza |
 |---|---|---|
-| 1 EHD · 2 ED · 3 PRESENCIAL · 4 PH Córdoba · 5 PH Río IV · 7 PH Río IV (ID previo) | bimestral | Período activo por la tabla hardcodeada del lambda (regla HF-0113: el de inicio de clases más próximo cuya venta, incluida la extensión, cubre hoy) + el resto de períodos como alternativos ocultos. 6 cuotas → 3 cuotas, frase de período de cursado y meses de cursado. Las presenciales usan la misma tabla que la distancia |
+| 1 EHD · 2 ED · 3 PRESENCIAL · 4 PH Córdoba · 5 PH Río IV · 7 PH Río IV (ID previo) | bimestral | Período activo por la tabla hardcodeada del lambda (regla HF-0113: el de inicio de clases más próximo cuya venta, incluida la extensión, cubre hoy) o, si Siglo 21 no lo devuelve, el próximo período de la tabla que sí vino + el resto de períodos como alternativos ocultos. 6 cuotas → 3 cuotas, frase de período de cursado y meses de cursado. Las presenciales usan la misma tabla que la distancia |
 | 9 PRESENCIAL (ID previo) · 10 · 12 | deriva a asesor | 200 sin consultar a Siglo 21 |
 | cualquier otra | — | Consulta token, turnos y períodos y termina en 500 |
 
-Si Siglo 21 no devuelve el período activo de la tabla, el lambda cotiza el **primer período
-de la API** como respaldo y el texto muestra el nombre y los meses del período de la tabla
-(la herramienta lo marca como "período de respaldo"). La tabla termina el 14/03/2027.
+Selección del período principal (rama bimestral):
+
+1. Si Siglo 21 devuelve el **período activo** de la tabla, se cotiza ese.
+2. Si no, se cotiza el **primer período posterior al activo** (en el orden de la tabla:
+   1A/26 → 1B/26 → 2A/26 → 2B/26 → 1A/27) que sí vino. Ej: activo 2B/26 y la API trae solo
+   `1/27 A` → se cotiza 1A/27 (marzo 2027). Nombre, fechas, meses de cursado y frase de
+   período de cursado salen del período cotizado, y el bloque de precio agrega en negrita una
+   aclaración: si es de otro ciclo, *"Para esta carrera y modalidad, la inscripción disponible
+   es para el próximo año: las clases comienzan en marzo 2027."*; si es del mismo ciclo,
+   *"Para esta carrera y modalidad, el próximo inicio disponible es en {nombre}."*. Las reglas
+   críticas prohíben ofrecer el inicio del período activo y el contexto interno suma una línea
+   `Nota:`.
+3. Si no vino ni el activo ni uno posterior de la tabla (solo períodos anteriores o fuera de
+   la tabla), **no se cotiza**: responde 500 con la instrucción de error (el bot deriva).
+
+En v4 los alternativos ocultos se ofrecen si el estudiante rechaza el principal **o si
+pregunta explícitamente por otro inicio o por el próximo año**. La tabla termina el 14/03/2027.
 
 El `cau_id` se usa tal cual llega (sin overrides) y `schedule_id` no se usa.
 
@@ -42,6 +57,7 @@ Veredictos (con el HTTP equivalente del lambda):
 | `AUTH_FAILED` | 401 | Falla el token |
 | `NO_SCHEDULES_AVAILABLE` / `NO_PERIODS_AVAILABLE` | 404 | Error o lista vacía en turnos / períodos |
 | `NO_ACTIVE_ED_EHD_PERIOD` | 500 | Modalidad bimestral (1, 2, 3, 4, 5, 7) fuera de todas las ventanas de la tabla del lambda |
+| `NO_ACTIVE_OR_NEXT_PERIOD` | 500 | Siglo 21 no devolvió el período activo ni uno posterior de la tabla (solo anteriores o fuera de tabla) |
 | `PRICE_FETCH_ERROR` | 500 | Falla el precio del período principal |
 | `UNSUPPORTED_MODALITY` | 500 | Modalidad sin lógica de precio en v4 |
 
