@@ -1,5 +1,5 @@
 // Réplica de get-price-v4 del lambda siglo21-price-proxy (rama
-// feat/v4-next-period-fallback, sobre PR #22 de conversia-legacy-lambdas) con fines de
+// fix/v4-calendario-comercial-2027 de conversia-legacy-lambdas, ticket HF-0123) con fines de
 // diagnóstico: en lugar de retornar solo el output o un error, registra cada
 // paso (URL, status HTTP, respuesta cruda, duración), qué hace v4 con cada
 // período que devuelve Siglo 21 y la respuesta exacta (HTTP + body) que daría
@@ -15,15 +15,16 @@ import {
   ED_EHD_PERIOD_ORDER,
   ED_EHD_PERIODS,
   MODALITY_NAMES,
-  buildCourseCoverageLine,
   buildEdEhdPeriodKey,
   buildNextPeriodNotice,
-  buildPeriodCoverageLabel,
+  classStartLine,
   formatPriceResponseV4,
   getActiveEdEhdPeriodKey,
+  isEdEhdPeriodOnSale,
   resolveV4PrimaryPeriod,
   round2,
   shownEdEhdAlternatives,
+  v4SubjectsLine,
   type PriceData,
   type PriceDataMap,
   type PriceResponse,
@@ -93,10 +94,8 @@ export interface PeriodRow {
   to: string;
   /** Clave del bimestre armada como el lambda (ej: "2B/26"), si aplica */
   key?: string;
-  /** Nombre legible según la tabla del lambda (ej: "octubre 2026") */
+  /** Nombre legible según la tabla del lambda (ej: "marzo 2027") */
   keyLabel?: string;
-  /** Meses de cursado que abarca (regla comercial fija; solo rama bimestral) */
-  coverageLabel?: string;
   use: PeriodUse;
   /** Explicación de por qué v4 lo usa o lo ignora */
   useLabel: string;
@@ -140,13 +139,15 @@ export interface Quote {
   total: number;
   cuota6: number;
   cuota3: number;
-  coverageLabel: string;
-  courseCoverageLine: string;
+  /** Oración de inicio de clases ("" si Siglo 21 no lo confirmó) */
+  classStartLine: string;
+  /** Oración de materias por semestre ("" si la carrera no está en la lista) */
+  subjectsLine: string;
   /** Clave del período activo según la tabla (difiere de periodKey si se cotiza el próximo) */
   activePeriodKey: string;
   /** Aclaración que agrega v4 cuando el activo no vino y se cotiza el próximo período ("" si no aplica) */
   nextPeriodNotice: string;
-  alternatives: { key: string; name: string; total: number; cuota6: number; cuota3: number; coverageLabel: string }[];
+  alternatives: { key: string; name: string; total: number; cuota6: number; cuota3: number; classStartLine: string }[];
 }
 
 export interface DiagnosisResult {
@@ -854,8 +855,7 @@ export async function diagnose(
       const key = buildEdEhdPeriodKey(row.name, row.subPeriod);
       if (key) {
         row.key = key;
-        row.keyLabel = ED_EHD_PERIODS[key]?.nombre;
-        row.coverageLabel = buildPeriodCoverageLabel(key, { startDate: row.from, endDate: row.to }) || undefined;
+        row.keyLabel = ED_EHD_PERIODS[key]?.nombre || undefined;
       }
     }
 
@@ -930,7 +930,7 @@ export async function diagnose(
       status: isNextPeriod ? "warning" : "ok",
       detail: isNextPeriod
         ? `La tabla indica que el activo es ${activeKey} (${activeName}), pero Siglo 21 NO devolvió ese período. v4 cotiza el próximo período de la tabla que sí vino: ${primaryKey} (${primaryName}), con sus propios nombre, fechas y meses, y agrega la aclaración: "${nextPeriodNotice}"`
-        : `Período activo según la tabla hardcodeada (regla HF-0113): ${activeKey} (${activeName}), ventana ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""}. Es el precio que ve el estudiante; el resto queda como alternativo oculto.`,
+        : `Período activo según la tabla hardcodeada (reglas HF-0113 y HF-0123): ${activeKey} (${activeName}), ventana ${activeInfo?.fechaInicio} → ${activeInfo?.fechaFin}${activeInfo?.fechaExtension ? ` con extensión hasta ${activeInfo.fechaExtension}` : ""} (uso interno: el agente no informa estas fechas). Es el precio que ve el estudiante; el resto queda como alternativo oculto.`,
     });
 
     primaryRow.use = "primary";
@@ -971,6 +971,10 @@ export async function diagnose(
         row.useLabel = "Omitido: no se puede armar la clave (name/subperiod)";
         continue;
       }
+      if (!isEdEhdPeriodOnSale(row.key, now)) {
+        row.useLabel = `Omitido: ${row.key} con venta cerrada o fuera de la tabla del lambda`;
+        continue;
+      }
       if (priceData[ALT_PERIOD_PREFIX + row.key]) {
         row.useLabel = `Omitido: la clave ${row.key} ya se cotizó`;
         continue;
@@ -1007,8 +1011,8 @@ export async function diagnose(
       total: primaryPd.price.total,
       cuota6,
       cuota3: round2(primaryPd.price.total / 3),
-      coverageLabel: buildPeriodCoverageLabel(primaryKey, primaryPd),
-      courseCoverageLine: buildCourseCoverageLine(programId, primaryKey, primaryPd),
+      classStartLine: classStartLine(primaryKey),
+      subjectsLine: v4SubjectsLine(programId),
       activePeriodKey: activeKey,
       nextPeriodNotice,
       alternatives: alts.map((a) => ({
@@ -1017,7 +1021,7 @@ export async function diagnose(
         total: a.pd.price.total,
         cuota6: round2(a.pd.price.total / 6),
         cuota3: round2(a.pd.price.total / 3),
-        coverageLabel: buildPeriodCoverageLabel(a.key, a.pd),
+        classStartLine: classStartLine(a.key),
       })),
     };
 

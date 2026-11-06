@@ -1,8 +1,7 @@
 // Port fiel (lógica pura, sin red) de get-price-v4 del lambda siglo21-price-proxy,
-// rama feat/v4-next-period-fallback (sobre PR #22 de conversia-legacy-lambdas):
+// rama fix/v4-calendario-comercial-2027 de conversia-legacy-lambdas (ticket HF-0123):
 // pkg/services/pricing-service.go → HandleGetPriceV4, getPricesByModalityV4,
-// FormatPriceResponseByModalityV4 / formatPriceResponseByModalityV3 (isV4 = true)
-// y helpers.
+// FormatPriceResponseByModalityV4 / formatV4BimesterResponse y helpers.
 //
 // Todo lo que depende del reloj recibe `now` como parámetro para poder probarlo
 // con fechas fijas; en producción la herramienta pasa `new Date()` (igual que el
@@ -118,25 +117,30 @@ export function goFixed(x: number, digits: number): string {
 
 const f2 = (x: number) => goFixed(x, 2);
 
-// ── Tabla bimestral (edEhdPeriods / edEhdPeriodOrder) ─────────────────────────
+// ── Tabla de períodos comerciales (edEhdPeriods / edEhdPeriodOrder) ──────────
+// Calendario comercial oficial de Siglo 21 (cuadro "NI", ticket HF-0123).
 
 export interface BimesterPeriodInfo {
-  fechaInicio: string; // inicio ventana de venta (dd/mm/yyyy)
-  fechaFin: string; // fin ventana de venta oficial (dd/mm/yyyy)
-  fechaExtension: string; // límite de extensión de venta (dd/mm/yyyy) — "" si no hay
-  inicioClases: string; // inicio de clases (dd/mm/yyyy)
-  nombre: string; // nombre legible (ej: "agosto 2026")
+  fechaInicio: string; // inicio ventana de venta (dd/mm/yyyy) — uso interno
+  fechaFin: string; // fin ventana de venta oficial (dd/mm/yyyy) — uso interno
+  fechaExtension: string; // límite de extensión (dd/mm/yyyy) — SOLO selección del activo; nunca se informa
+  inicioClases: string; // inicio de clases confirmado por Siglo 21 (ej: "marzo 2027"); "" si no está confirmado
+  nombre: string; // nombre legible del inicio (ej: "marzo 2027"); "" si no está confirmado
 }
 
+// Las filas de 2026 se conservan como histórico (ventanas ya cerradas).
 export const ED_EHD_PERIODS: Record<string, BimesterPeriodInfo> = {
   "1A/26": { fechaInicio: "25/08/2025", fechaFin: "15/03/2026", fechaExtension: "29/03/2026", inicioClases: "16/03/2026", nombre: "marzo 2026" },
   "1B/26": { fechaInicio: "16/03/2026", fechaFin: "17/05/2026", fechaExtension: "31/05/2026", inicioClases: "18/05/2026", nombre: "mayo 2026" },
   "2A/26": { fechaInicio: "18/05/2026", fechaFin: "02/08/2026", fechaExtension: "16/08/2026", inicioClases: "03/08/2026", nombre: "agosto 2026" },
   "2B/26": { fechaInicio: "03/08/2026", fechaFin: "04/10/2026", fechaExtension: "18/10/2026", inicioClases: "05/10/2026", nombre: "octubre 2026" },
-  "1A/27": { fechaInicio: "28/07/2026", fechaFin: "14/03/2027", fechaExtension: "", inicioClases: "15/03/2027", nombre: "marzo 2027" },
+  "1A/27": { fechaInicio: "28/07/2026", fechaFin: "14/03/2027", fechaExtension: "28/03/2027", inicioClases: "marzo 2027", nombre: "marzo 2027" },
+  "1B/27": { fechaInicio: "15/03/2027", fechaFin: "16/05/2027", fechaExtension: "30/05/2027", inicioClases: "", nombre: "" },
+  "2A/27": { fechaInicio: "17/05/2027", fechaFin: "01/08/2027", fechaExtension: "15/08/2027", inicioClases: "", nombre: "" },
+  "2B/27": { fechaInicio: "02/08/2027", fechaFin: "03/10/2027", fechaExtension: "17/10/2027", inicioClases: "", nombre: "" },
 };
 
-export const ED_EHD_PERIOD_ORDER = ["1A/26", "1B/26", "2A/26", "2B/26", "1A/27"];
+export const ED_EHD_PERIOD_ORDER = ["1A/26", "1B/26", "2A/26", "2B/26", "1A/27", "1B/27", "2A/27", "2B/27"];
 
 function parseDdMmYyyy(value: string): number | null {
   const m = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -203,6 +207,21 @@ export function resolveV4PrimaryPeriod(
   return null;
 }
 
+/**
+ * isEdEhdPeriodOnSaleAt: la ventana de venta del período (incluida la extensión)
+ * contiene el día UTC de `now`. Un período fuera de la tabla se considera fuera
+ * de venta. Filtra los alternativos (la API puede devolver períodos cerrados).
+ */
+export function isEdEhdPeriodOnSale(periodKey: string, now: Date): boolean {
+  const info = ED_EHD_PERIODS[periodKey];
+  if (!info) return false;
+  const inicio = parseDdMmYyyy(info.fechaInicio);
+  const cierre = parseDdMmYyyy(info.fechaExtension || info.fechaFin);
+  if (inicio === null || cierre === null) return false;
+  const today = truncateUtcDay(now);
+  return today >= inicio && today <= cierre;
+}
+
 /** periodCycle: "2B/26" → "26". */
 function periodCycle(periodKey: string): string {
   const idx = periodKey.lastIndexOf("/");
@@ -211,19 +230,20 @@ function periodCycle(periodKey: string): string {
 
 /**
  * buildNextPeriodNotice: aclaración que se muestra cuando V4 cotiza un período
- * posterior al activo porque la API no devolvió el activo. Si el período es de
- * otro ciclo se aclara que es para el próximo año. "" si es el activo.
+ * posterior al activo porque la API no devolvió el activo. Solo menciona el
+ * inicio de clases si Siglo 21 lo confirmó (HF-0123). "" si es el activo.
  */
 export function buildNextPeriodNotice(primaryKey: string, activeKey: string): string {
   if (primaryKey === "" || primaryKey === activeKey) return "";
-  const nombre = ED_EHD_PERIODS[primaryKey]?.nombre || primaryKey;
-  if (periodCycle(primaryKey) !== periodCycle(activeKey)) {
-    return `Para esta carrera y modalidad, la inscripción disponible es para el próximo año: las clases comienzan en ${nombre}.`;
+  const target = periodCycle(primaryKey) !== periodCycle(activeKey) ? "el próximo año" : "el próximo período";
+  const inicio = ED_EHD_PERIODS[primaryKey]?.inicioClases;
+  if (inicio) {
+    return `Para esta carrera y modalidad, la inscripción disponible es para ${target}: las clases inician en ${inicio}.`;
   }
-  return `Para esta carrera y modalidad, el próximo inicio disponible es en ${nombre}.`;
+  return `Para esta carrera y modalidad, la inscripción disponible es para ${target}.`;
 }
 
-// ── Cobertura de cursado (V4) ─────────────────────────────────────────────────
+// ── Materias por semestre (V4, HF-0123) ──────────────────────────────────────
 
 const PROGRAM_DEGREE_TYPES: Record<number, "licenciatura" | "tecnicatura"> = {
   8416: "licenciatura",
@@ -242,95 +262,27 @@ const PROGRAM_DEGREE_TYPES: Record<number, "licenciatura" | "tecnicatura"> = {
   4942: "tecnicatura",
 };
 
-function getCoveredSubjects(programId: number, periodKey: string): number | null {
+/**
+ * v4SubjectsLine: tecnicaturas 4 materias por semestre; licenciaturas entre 5 y
+ * 6. Solo carreras de la lista; "" si la carrera no está (no se informa).
+ */
+export function v4SubjectsLine(programId: number): string {
   const degreeType = PROGRAM_DEGREE_TYPES[programId];
-  if (!degreeType) return null;
-  const isB = periodKey.length >= 2 && periodKey[1] === "B";
-  if (degreeType === "tecnicatura") return isB ? 2 : 4;
-  return isB ? 3 : 6;
+  if (degreeType === "tecnicatura") return "Te cuento, nuestro arancel es integral: en esta carrera cursás 4 materias por semestre.";
+  if (degreeType === "licenciatura") return "Te cuento, nuestro arancel es integral: en esta carrera cursás entre 5 y 6 materias por semestre.";
+  return "";
 }
 
-const SPANISH_MONTHS = [
-  "enero", "febrero", "marzo", "abril", "mayo", "junio",
-  "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
-];
-
-/** parsePeriodDate: mismos layouts que el lambda. Devuelve {year, month} literales. */
-function parsePeriodDate(value: string): { year: number; month: number } | null {
-  const v = value.trim();
-  if (!v) return null;
-  const iso =
-    v.match(/^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/) ??
-    v.match(/^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d+)?$/) ??
-    v.match(/^(\d{4})-(\d{2})-(\d{2}) \d{2}:\d{2}:\d{2}(\.\d+)?$/) ??
-    v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) {
-    const month = Number(iso[2]);
-    if (month < 1 || month > 12) return null;
-    return { year: Number(iso[1]), month };
-  }
-  const dmy = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (dmy) {
-    const month = Number(dmy[2]);
-    if (month < 1 || month > 12) return null;
-    return { year: Number(dmy[3]), month };
-  }
-  return null;
+/** Oración de inicio de clases ("" si Siglo 21 no lo confirmó). */
+export function classStartLine(periodKey: string): string {
+  const inicio = ED_EHD_PERIODS[periodKey]?.inicioClases;
+  return inicio ? `Las clases inician en ${inicio}.` : "";
 }
 
-function formatMonthYear(value: string): string | null {
-  const p = parsePeriodDate(value);
-  return p ? `${SPANISH_MONTHS[p.month - 1]} ${p.year}` : null;
-}
+export const V4_EARLY_ENROLLMENT_LINE = "Si te inscribís esta semana, contás con beneficios especiales por inscripción anticipada.";
 
-/** edEhdCoverageMonths: regla comercial fija por bimestre. */
-export function edEhdCoverageMonths(periodKey: string): [string, string] | null {
-  if (periodKey.length < 2) return null;
-  const k = periodKey.slice(0, 2);
-  if (k === "1A") return ["marzo", "julio"];
-  if (k === "1B") return ["mayo", "julio"];
-  if (k === "2A") return ["agosto", "diciembre"];
-  if (k === "2B") return ["octubre", "diciembre"];
-  return null;
-}
-
-function edEhdPeriodYear(periodKey: string): number {
-  const idx = periodKey.lastIndexOf("/");
-  if (idx === -1) return 0;
-  const tail = periodKey.slice(idx + 1);
-  if (!/^[+-]?\d+$/.test(tail)) return 0;
-  return 2000 + Number(tail);
-}
-
-/** buildPeriodCoverageLabel: "octubre 2026 a diciembre 2026". */
-export function buildPeriodCoverageLabel(periodKey: string, pd?: { startDate: string; endDate: string }): string {
-  const months = edEhdCoverageMonths(periodKey);
-  if (months) {
-    const year = edEhdPeriodYear(periodKey);
-    if (year !== 0) return `${months[0]} ${year} a ${months[1]} ${year}`;
-  }
-  if (!pd) return "";
-  const start = formatMonthYear(pd.startDate);
-  const end = formatMonthYear(pd.endDate);
-  if (!start || !end) return "";
-  return `${start} a ${end}`;
-}
-
-/** buildCourseCoverageLine (solo V4). "" si no aplica. */
-export function buildCourseCoverageLine(programId: number, periodKey: string, pd?: PriceData): string {
-  const subjects = getCoveredSubjects(programId, periodKey);
-  if (subjects === null || !pd || !periodKey) return "";
-  let year = 0;
-  if (pd.startDate) {
-    const parsed = parsePeriodDate(pd.startDate);
-    if (parsed) year = parsed.year;
-  }
-  if (year === 0) year = edEhdPeriodYear(periodKey);
-  if (year === 0) return "";
-  const months = edEhdCoverageMonths(periodKey);
-  if (!months) return "";
-  return `Te cuento, nuestro arancel es integral y es por periodo de cursado. Ahora abonarías el periodo de ${months[0]} ${year} a ${months[1]} ${year} que te cubre hasta ${subjects} materias`;
-}
+const V4_INFO_STRUCTURE_RULE =
+  "- Estructura del primer mensaje: carrera consultada, inicio de clases (solo si figura en el bloque), beneficio por inscripción anticipada, arancel en 6 cuotas fijas, conceptos incluidos y la pregunta de avance. No agregues otros datos.\n";
 
 // ── Bloques de texto (copias literales del lambda) ────────────────────────────
 
@@ -404,32 +356,26 @@ export function shownEdEhdAlternatives(priceData: PriceDataMap): { key: string; 
   return out;
 }
 
-function buildEdEhdAlternativesContext(priceData: PriceDataMap): string {
+/** buildV4AlternativesContext: sin fechas de venta/extensión ni meses de cursado (HF-0123). */
+function buildV4AlternativesContext(priceData: PriceDataMap): string {
   const alts = shownEdEhdAlternatives(priceData);
   if (alts.length === 0) return "";
   let b = "";
-  b += "\n\n═══════════════════════════════════════════════════════════════\n";
-  // Encabezado de V4 (isV4 = true en el lambda): también si pregunta por otro inicio / el próximo año.
-  b += "📅 PERÍODOS ALTERNATIVOS (Referencia interna — NO mostrar salvo que el usuario rechace el período principal o pregunte por otro inicio / el próximo año):\n";
-  b += "═══════════════════════════════════════════════════════════════\n";
-  b += "Usar SOLO si el estudiante no puede o no quiere el período principal, o si pregunta explícitamente por otro inicio o por el próximo año (en ese caso, dale el precio del período que pide aunque el principal siga disponible). Ofrecé uno a la vez, con el mismo formato del bloque de precio principal.\n";
-  b += "Al ofrecer cualquiera de estas opciones, aclarale SIEMPRE al estudiante qué meses de cursado abarca ese período (dato \"Meses de cursado\" de cada opción).\n\n";
+  b += "\n\n" + SEP;
+  b += "📅 PERÍODOS ALTERNATIVOS (Referencia interna — NO mostrar salvo que el estudiante no pueda comenzar en el período principal o pregunte por otro inicio / el próximo año):\n";
+  b += SEP;
+  b += "Ofrecé uno a la vez, con el mismo formato del bloque de precio principal y solo con los datos de ese período. Nunca informes fechas de venta, de cierre ni de extensión.\n\n";
   for (const alt of alts) {
-    const info = ED_EHD_PERIODS[alt.key];
-    const nombre = info?.nombre || alt.key;
+    const inicio = ED_EHD_PERIODS[alt.key]?.inicioClases;
     const cuota6 = round2(alt.pd.price.total / 6);
     const cuota3 = round2(alt.pd.price.total / 3);
-    b += `── Opción: ${nombre} (período ${alt.key}) ──\n`;
-    if (info) {
-      b += `Inicio de clases: ${info.inicioClases}\n`;
-      b += info.fechaExtension
-        ? `Ventana de venta: ${info.fechaInicio} → ${info.fechaFin} (extensión hasta ${info.fechaExtension})\n`
-        : `Ventana de venta: ${info.fechaInicio} → ${info.fechaFin}\n`;
-    }
-    const coverage = buildPeriodCoverageLabel(alt.key, alt.pd);
-    if (coverage) b += `Meses de cursado que abarca este período: ${coverage}\n`;
-    b += `Total del período de cursado (matrícula + aranceles — NO de la carrera completa): $${f2(alt.pd.price.total)} | 6 cuotas: $${f2(cuota6)} | 3 cuotas: $${f2(cuota3)}\n`;
-    b += `Oración de precio sugerida: **Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de $${f2(cuota6)} (dependiendo del banco de tu tarjeta).**\n\n`;
+    b += `── Opción: período ${alt.key} ──\n`;
+    b += inicio
+      ? `Oración de inicio de clases: Las clases inician en ${inicio}.\n`
+      : "Inicio de clases: no confirmado — no informes día ni mes de inicio.\n";
+    b += `Total del período (matrícula + aranceles — NO de la carrera completa): $${f2(alt.pd.price.total)} | 6 cuotas: $${f2(cuota6)}\n`;
+    b += `Oración de precio sugerida: **Hoy podés inscribirte y abonar el período en 6 cuotas fijas de $${f2(cuota6)}, dependiendo del banco de tu tarjeta.**\n`;
+    b += `Solo ante objeción de financiación: También contamos con la alternativa de abonar en 3 cuotas fijas de $${f2(cuota3)}, dependiendo del banco de tu tarjeta. ¿Te gustaría evaluar esta opción?\n\n`;
   }
   return b;
 }
@@ -437,12 +383,10 @@ function buildEdEhdAlternativesContext(priceData: PriceDataMap): string {
 const SEP = "═══════════════════════════════════════════════════════════════\n";
 const DASH = "------------------------------------------------------------------\n";
 
-// ── FormatPriceResponseByModalityV4 ───────────────────────────────────────────
+// ── FormatPriceResponseByModalityV4 → formatV4BimesterResponse ────────────────
 
 export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: number, req: V4Request, now: Date): string {
-  const llmInstruction = req.llmInstruction;
-
-  // ── Lógica bimestral (1, 2, 3, 4, 5, 7) ──
+  // ── Lógica bimestral (1, 2, 3, 4, 5, 7) ── criterios HF-0123
   if (BIMESTER_MODALITIES.has(modalityId)) {
     const primaryData = priceData["primary"];
     if (!primaryData) return "No se pudo obtener el precio del período activo.";
@@ -452,59 +396,62 @@ export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: numbe
     const activeKey = getActiveEdEhdPeriodKey(now);
     const primaryKey = buildEdEhdPeriodKey(primaryData.periodName, primaryData.subPeriod) || activeKey;
     const nextPeriodNotice = buildNextPeriodNotice(primaryKey, activeKey);
-    const primaryInfo = ED_EHD_PERIODS[primaryKey];
 
     const cuota6 = round2(primaryData.price.total / 6);
     const cuota3 = round2(primaryData.price.total / 3);
-    const periodDisplayName = primaryInfo?.nombre || primaryKey;
-    const courseCoverageLine = buildCourseCoverageLine(req.programId, primaryKey, primaryData);
-    const pricePhrase = `**Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de $${f2(cuota6)} (dependiendo del banco de tu tarjeta).**`;
+    const classStart = classStartLine(primaryKey);
+    const subjectsLine = v4SubjectsLine(req.programId);
+
+    const pricePhrase = `**Hoy podés inscribirte y abonar el período en 6 cuotas fijas de $${f2(cuota6)}, dependiendo del banco de tu tarjeta.**`;
+    const objectionPhrase = `También contamos con la alternativa de abonar en 3 cuotas fijas de $${f2(cuota3)}, dependiendo del banco de tu tarjeta. ¿Te gustaría evaluar esta opción?`;
+    const headerSuffix = nextPeriodNotice !== "" ? "" : " (período comercial activo)";
 
     const userMessage =
       "[INSTRUCTION:\n\nUsa el siguiente **Bloque de Precio**:\n\n" +
-      `Mirá, {nombre}. Con lo que me contaste —{impacto esperado del usuario}—, tiene sentido que aproveches el próximo inicio en ${periodDisplayName}.\n` +
+      `🎓 Te paso la información que pediste sobre la {carrera consultada}${headerSuffix}:\n` +
       formatOptionalPromptLine(boldOptional(nextPeriodNotice)) +
-      formatOptionalPromptLine(courseCoverageLine) +
-      `${pricePhrase}\n` +
-      "Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y materiales de estudio digitales y acceso a biblioteca.\n" +
-      "**¿Te parece viable esta forma de pago?**\n\n";
+      formatOptionalPromptLine(classStart) +
+      V4_EARLY_ENROLLMENT_LINE + "\n" +
+      pricePhrase + "\n" +
+      "Esta cotización corresponde al período activo e incluye matrícula, paquete de materias, derechos de examen y materiales de estudio digitales.\n" +
+      formatOptionalPromptLine(subjectsLine) +
+      "**¿Te parece viable esta forma de pago o querés que te conecte con un asesor de Admisiones para avanzar con la inscripción o evaluar opciones?**\n\n";
 
-    let courseCoverageRule = courseCoverageLine
-      ? `- La **oración del período de cursado** es inmutable: "${courseCoverageLine}". No la modifiques ni parafrasees.\n`
-      : "";
+    let rules = "[REGLAS CRÍTICAS (OBLIGATORIAS):\n";
+    rules += "- Variable opcional ({carrera consultada}): si no está disponible, reformula mínimamente sin inventar contenido ni mostrar llaves.\n";
+    rules += V4_INFO_STRUCTURE_RULE;
+    rules += `- La **oración del precio** es inmutable: "${pricePhrase}". No la modifiques ni parafrasees.\n`;
+    rules += classStart
+      ? `- La **oración de inicio de clases** es inmutable: "${classStart}". No agregues un día ni otra fecha de inicio.\n`
+      : "- Para este período **no hay inicio de clases confirmado**: no informes ningún día ni mes de inicio de clases. Si el estudiante lo pregunta, ofrecé derivarlo a un asesor de Admisión para confirmarlo.\n";
+    rules += `- La **oración del beneficio** es inmutable: "${V4_EARLY_ENROLLMENT_LINE}". No agregues montos, porcentajes ni condiciones del beneficio.\n`;
+    rules += subjectsLine
+      ? `- La **oración de materias** es inmutable: "${subjectsLine}". No la modifiques ni parafrasees.\n`
+      : "- No informes cuántas materias se cursan: esta herramienta no tiene ese dato para esta carrera.\n";
     if (nextPeriodNotice !== "") {
-      const activeName = ED_EHD_PERIODS[activeKey]?.nombre || activeKey;
-      courseCoverageRule += `- La **aclaración del período** es inmutable y obligatoria: "${nextPeriodNotice}". No la omitas, modifiques ni parafrasees.\n`;
-      courseCoverageRule += `- El inicio de ${activeName} **no está disponible** para esta carrera y modalidad: no lo ofrezcas ni lo menciones como opción.\n`;
+      rules += `- La **aclaración del período** es inmutable y obligatoria: "${nextPeriodNotice}". No la omitas, modifiques ni parafrasees.\n`;
+      rules += `- El período ${activeKey} **no está disponible** para esta carrera y modalidad: no lo ofrezcas ni lo menciones como opción.\n`;
     }
-    const altRule =
-      shownEdEhdAlternatives(priceData).length > 0
-        ? "- Existen **otros períodos de inicio disponibles** como alternativa. Ofrecelos **solo** si el estudiante rechaza el período principal **o si pregunta explícitamente por otro inicio o por el próximo año** (ej: \"¿y para marzo?\", \"¿cuánto sale el año que viene?\"); en ese caso dale el precio del período que pide aunque el principal siga disponible. De a uno por vez y con el mismo formato del bloque de precio. Los detalles están al final, en la sección \"PERÍODOS ALTERNATIVOS\" del contexto interno.\n"
-        : "";
-    const coverageMonthsRule =
-      "- Siempre que presentes un período (el principal o un alternativo), aclarale al estudiante **qué meses de cursado abarca** (ej: \"este período cubre de octubre a diciembre 2026\"). Usá los meses que figuran en el contexto interno de cada período; si no figuran, no los inventes.\n";
-
-    const criticalRules =
-      "[REGLAS CRÍTICAS (OBLIGATORIAS):\n" +
-      "- Variables opcionales ({nombre}, {impacto esperado del usuario}): si no están disponibles, reformula mínimamente sin inventar contenido ni mostrar llaves.\n" +
-      `- La **oración del precio** es inmutable: "${pricePhrase}". No la modifiques ni parafrasees.\n` +
-      courseCoverageRule +
-      altRule +
-      coverageMonthsRule +
-      "- **Nunca** muestres llaves {} ni nombres de variables en la respuesta.\n" +
-      "- SIEMPRE ofrecer primero 6 cuotas fijas. NUNCA ofrecer más cuotas por iniciativa propia.\n" +
-      `- Si el usuario tiene objeción con las cuotas o dificultad para pagar en 6 cuotas: ofrecer **3 cuotas fijas de $${f2(cuota3)} (dependiendo del banco de tu tarjeta)** como alternativa.\n` +
-      "- Todos los importes de esta herramienta corresponden ÚNICAMENTE al **período de cursado activo** (matrícula + aranceles). Esta herramienta **NO dispone del costo total de la carrera completa**: si el usuario pregunta cuánto cuesta toda la carrera, NUNCA presentes ninguno de estos montos como \"precio total de la carrera\"; explicá que el arancel es por período de cursado y ofrecé derivarlo a un asesor de Admisión para esa proyección.\n" +
-      "- No hagas cálculos ni expliques precios adicionales salvo pedido explícito del usuario.\n" +
-      "- Si el usuario pregunta por medios de pago, bancos, cuotas sin interés, tasas o promociones: **invoca la Tool de Admisión › Matrícula y Medios de Pago de la Carrera** y entregá exactamente su resultado.\n" +
-      "- Prohibido decir que los aranceles se pueden pagar por transferencia bancaria.\n" +
-      "- Si el usuario expresa objeción económica o intención de postergar con interés real en estudiar: **activá el Protocolo de Beneficios Económicos**.\n" +
-      "- Después de presentar el precio, **actualiza el custom field con key \"interest_qualification_reason\" del deal con el valor 55**.]\n\n";
+    rules += "- **Nunca** informes fechas de inicio o fin de venta, de cierre de inscripción ni de extensión, aunque el estudiante las pida. Tampoco informes qué meses o fechas cubre el pago.\n";
+    if (shownEdEhdAlternatives(priceData).length > 0) {
+      rules +=
+        "- Existen **otros períodos disponibles** como alternativa. Primero ofrecé siempre el período principal. Ofrecé un alternativo **solo** si el estudiante dice que no puede comenzar en el período principal **o si pregunta explícitamente por otro inicio o por el próximo año**; en ese caso usá solo los datos y el precio de ese período, sin mezclarlos con los del principal. De a uno por vez y con el mismo formato del bloque de precio. Los detalles están al final, en la sección \"PERÍODOS ALTERNATIVOS\" del contexto interno.\n";
+    }
+    rules += "- **Nunca** muestres llaves {} ni nombres de variables en la respuesta.\n";
+    rules += "- En el primer mensaje ofrecé **solo** las 6 cuotas fijas: **no menciones** la opción de 3 cuotas. NUNCA ofrezcas más cuotas por iniciativa propia.\n";
+    rules += `- Solo si el estudiante manifiesta una objeción con la financiación o dice que la propuesta no le resulta viable, respondé: "${objectionPhrase}"\n`;
+    rules +=
+      "- Todos los importes de esta herramienta corresponden ÚNICAMENTE al **período activo** (matrícula + aranceles). Esta herramienta **NO dispone del costo total de la carrera completa**: si el usuario pregunta cuánto cuesta toda la carrera, NUNCA presentes ninguno de estos montos como \"precio total de la carrera\"; explicá que el arancel es por período y ofrecé derivarlo a un asesor de Admisión para esa proyección.\n";
+    rules += "- No hagas cálculos ni expliques precios adicionales salvo pedido explícito del usuario.\n";
+    rules += "- Si el usuario pregunta por medios de pago, bancos, cuotas sin interés, tasas o promociones: **invoca la Tool de Admisión › Matrícula y Medios de Pago de la Carrera** y entregá exactamente su resultado.\n";
+    rules += "- Prohibido decir que los aranceles se pueden pagar por transferencia bancaria.\n";
+    rules += "- Si el usuario expresa objeción económica o intención de postergar con interés real en estudiar: **activá el Protocolo de Beneficios Económicos**.\n";
+    rules += "- Después de presentar el precio, **actualiza el custom field con key \"interest_qualification_reason\" del deal con el valor 55**.]\n\n";
 
     let ctx = "";
-    if (llmInstruction !== "") {
+    if (req.llmInstruction !== "") {
       ctx += "\n\n" + SEP + "🤖 CONTEXTO PARA EL AGENTE DE IA\n" + SEP + "\n";
-      ctx += llmInstruction + "\n\n";
+      ctx += req.llmInstruction + "\n\n";
     }
     ctx += "📋 DATOS DEL PERÍODO ACTIVO (no mostrar al usuario):\n" + DASH;
     ctx += buildTodayLine(now);
@@ -512,20 +459,12 @@ export function formatPriceResponseV4(priceData: PriceDataMap, modalityId: numbe
     if (nextPeriodNotice !== "") {
       ctx += `Nota: el período vigente según calendario (${activeKey}) no vino para esta carrera y modalidad; se cotiza el próximo período disponible.\n`;
     }
-    if (primaryInfo) {
-      ctx += `Inicio de clases: ${primaryInfo.inicioClases}\n`;
-      ctx += primaryInfo.fechaExtension
-        ? `Ventana de venta: ${primaryInfo.fechaInicio} → ${primaryInfo.fechaFin} (extensión hasta ${primaryInfo.fechaExtension})\n`
-        : `Ventana de venta: ${primaryInfo.fechaInicio} → ${primaryInfo.fechaFin}\n`;
-    }
-    const coverage = buildPeriodCoverageLabel(primaryKey, primaryData);
-    if (coverage) ctx += `Meses de cursado que abarca este período: ${coverage}\n`;
-    ctx += `Total del período de cursado (matrícula + aranceles — NO de la carrera completa): $${f2(primaryData.price.total)} | 6 cuotas: $${f2(cuota6)} | 3 cuotas: $${f2(cuota3)}\n`;
+    ctx += `Total del período (matrícula + aranceles — NO de la carrera completa): $${f2(primaryData.price.total)} | 6 cuotas: $${f2(cuota6)}\n`;
     ctx += createPriceNoteV2(primaryData.price);
     ctx += buildPaymentAndRestrictionsContext(req);
-    ctx += buildEdEhdAlternativesContext(priceData);
+    ctx += buildV4AlternativesContext(priceData);
 
-    return userMessage + criticalRules + ctx;
+    return userMessage + rules + ctx;
   }
 
   // En v4 ninguna otra modalidad llega al formateador (getPricesByModalityV4 corta con 500).
