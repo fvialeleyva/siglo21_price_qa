@@ -3,11 +3,12 @@
 Herramienta interna de Conversia para que el equipo de CS pueda diagnosticar por qué
 falló una consulta de precio del bot, sin depender de alguien técnico.
 
-Replica **`get-price-v4`** del middleware `siglo21-price-proxy` tal como queda con el PR
-[Conversia-AI/conversia-legacy-lambdas#22](https://github.com/Conversia-AI/conversia-legacy-lambdas/pull/22)
-más la rama `feat/v4-next-period-fallback` (selección del próximo período disponible;
+Replica **`get-price-v4`** del middleware `siglo21-price-proxy` tal como queda con la rama
+`fix/v4-calendario-comercial-2027` de
+[Conversia-AI/conversia-legacy-lambdas](https://github.com/Conversia-AI/conversia-legacy-lambdas)
+(ticket HF-0123: calendario comercial 2027 y criterios de comunicación;
 `pkg/services/pricing-service.go` → `HandleGetPriceV4`, `getPricesByModalityV4`,
-`resolveV4PrimaryPeriod`, `FormatPriceResponseByModalityV4`):
+`resolveV4PrimaryPeriod`, `FormatPriceResponseByModalityV4` / `formatV4BimesterResponse`):
 
 ```
 Validación v4 → ¿Deriva a asesor (9, 10, 12)? → Token (client_credentials) → 1) Turnos (se usa el PRIMERO) → 2) Períodos → 3) Precios según la rama (en secuencia)
@@ -17,27 +18,34 @@ Ramas de precio (igual que el lambda):
 
 | Modalidad | Rama | Qué cotiza |
 |---|---|---|
-| 1 EHD · 2 ED · 3 PRESENCIAL · 4 PH Córdoba · 5 PH Río IV · 7 PH Río IV (ID previo) | bimestral | Período activo por la tabla hardcodeada del lambda (regla HF-0113: el de inicio de clases más próximo cuya venta, incluida la extensión, cubre hoy) o, si Siglo 21 no lo devuelve, el próximo período de la tabla que sí vino + el resto de períodos como alternativos ocultos. 6 cuotas → 3 cuotas, frase de período de cursado y meses de cursado. Las presenciales usan la misma tabla que la distancia |
+| 1 EHD · 2 ED · 3 PRESENCIAL · 4 PH Córdoba · 5 PH Río IV · 7 PH Río IV (ID previo) | bimestral | Período activo por el calendario comercial hardcodeado del lambda (reglas HF-0113 y HF-0123: el vigente más próximo cuya venta, incluida la extensión, cubre hoy) o, si Siglo 21 no lo devuelve, el próximo período de la tabla que sí vino + los demás períodos **en venta** como alternativos ocultos. Primero 6 cuotas; 3 cuotas solo ante objeción. Las presenciales usan la misma tabla que la distancia |
 | 9 PRESENCIAL (ID previo) · 10 · 12 | deriva a asesor | 200 sin consultar a Siglo 21 |
 | cualquier otra | — | Consulta token, turnos y períodos y termina en 500 |
+
+Calendario comercial (cuadro "NI" de Siglo 21): 1A/27 28/07/2026–14/03/2027 (ext. 28/03/2027),
+1B/27 15/03–16/05/2027 (ext. 30/05), 2A/27 17/05–01/08/2027 (ext. 15/08), 2B/27
+02/08–03/10/2027 (ext. 17/10). Las fechas de venta y extensión son de uso interno: el agente
+nunca las informa. Solo 1A/27 tiene inicio de clases confirmado ("Las clases inician en marzo
+2027."). El bloque de precio informa además el beneficio por inscripción anticipada y, para
+las carreras de la lista, las materias por semestre (tecnicaturas 4; licenciaturas entre 5 y 6).
+No informa meses ni fechas que cubre el pago.
 
 Selección del período principal (rama bimestral):
 
 1. Si Siglo 21 devuelve el **período activo** de la tabla, se cotiza ese.
 2. Si no, se cotiza el **primer período posterior al activo** (en el orden de la tabla:
-   1A/26 → 1B/26 → 2A/26 → 2B/26 → 1A/27) que sí vino. Ej: activo 2B/26 y la API trae solo
-   `1/27 A` → se cotiza 1A/27 (marzo 2027). Nombre, fechas, meses de cursado y frase de
-   período de cursado salen del período cotizado, y el bloque de precio agrega en negrita una
-   aclaración: si es de otro ciclo, *"Para esta carrera y modalidad, la inscripción disponible
-   es para el próximo año: las clases comienzan en marzo 2027."*; si es del mismo ciclo,
-   *"Para esta carrera y modalidad, el próximo inicio disponible es en {nombre}."*. Las reglas
-   críticas prohíben ofrecer el inicio del período activo y el contexto interno suma una línea
-   `Nota:`.
+   1A/27 → 1B/27 → 2A/27 → 2B/27) que sí vino, con su propio precio, y el bloque de precio
+   agrega en negrita una aclaración: *"Para esta carrera y modalidad, la inscripción
+   disponible es para el próximo período."* (o *"…para el próximo año."* si es de otro
+   ciclo; con *": las clases inician en {inicio}."* si el período tiene inicio confirmado).
+   Las reglas críticas prohíben ofrecer el período activo y el contexto interno suma una
+   línea `Nota:`.
 3. Si no vino ni el activo ni uno posterior de la tabla (solo períodos anteriores o fuera de
    la tabla), **no se cotiza**: responde 500 con la instrucción de error (el bot deriva).
 
-En v4 los alternativos ocultos se ofrecen si el estudiante rechaza el principal **o si
-pregunta explícitamente por otro inicio o por el próximo año**. La tabla termina el 14/03/2027.
+En v4 los alternativos ocultos (solo los que están en su ventana de venta) se ofrecen si el
+estudiante no puede comenzar en el principal **o si pregunta explícitamente por otro inicio o
+por el próximo año**. El calendario cargado termina el 17/10/2027.
 
 El `cau_id` se usa tal cual llega (sin overrides) y `schedule_id` no se usa.
 

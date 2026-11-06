@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import { V4_EARLY_ENROLLMENT_LINE } from "@/lib/get-price-v4";
 import type { DiagnosisResult, PeriodRow, Quote, StepResult } from "@/lib/siglo21";
 
 // ── Marca Conversia ─────────────────────────────────────────────────────────────
@@ -311,27 +312,29 @@ function QuoteMessage({ q }: { q: Quote }) {
   return (
     <>
       <p className="text-sm">
-        Mirá 👋. Con lo que me contaste, tiene sentido que aproveches el próximo inicio en {q.periodName}.
+        🎓 Te paso la información que pediste sobre la carrera consultada
+        {q.nextPeriodNotice ? "" : " (período comercial activo)"}:
       </p>
       {q.nextPeriodNotice && <p className="text-sm mt-1 font-semibold">{q.nextPeriodNotice}</p>}
-      {q.courseCoverageLine && <p className="text-sm mt-1">{q.courseCoverageLine}</p>}
+      {q.classStartLine && <p className="text-sm mt-1">{q.classStartLine}</p>}
+      <p className="text-sm mt-1">{V4_EARLY_ENROLLMENT_LINE}</p>
       <PriceSentence>
-        Hoy podés inscribirte y abonar el periodo de cursado en 6 cuotas fijas de {money(q.cuota6)} (dependiendo
-        del banco de tu tarjeta).
+        Hoy podés inscribirte y abonar el período en 6 cuotas fijas de {money(q.cuota6)}, dependiendo del banco
+        de tu tarjeta.
       </PriceSentence>
       <p className="text-sm text-gray-700">
-        Este arancel incluye: matrícula, paquete de materias, derechos de exámenes y materiales de estudio
-        digitales y acceso a biblioteca.
+        Esta cotización corresponde al período activo e incluye matrícula, paquete de materias, derechos de examen y
+        materiales de estudio digitales.
       </p>
-      <p className="mt-1 text-sm font-medium">¿Te parece viable esta forma de pago?</p>
+      {q.subjectsLine && <p className="text-sm mt-1">{q.subjectsLine}</p>}
+      <p className="mt-1 text-sm font-medium">
+        ¿Te parece viable esta forma de pago o querés que te conecte con un asesor de Admisiones para avanzar con la
+        inscripción o evaluar opciones?
+      </p>
       <div className="mt-3 border-t border-dashed border-gray-200 pt-2 text-xs text-gray-500 space-y-1">
-        {q.coverageLabel && (
-          <p>
-            🗓️ El agente aclara los meses de cursado: <span className="font-semibold text-gray-700">{q.coverageLabel}</span>.
-          </p>
-        )}
+        {!q.classStartLine && <p>🗓️ Sin inicio de clases confirmado: el agente no informa fecha de inicio.</p>}
         <p>
-          🔁 Si el estudiante no puede con 6 cuotas, ofrece{" "}
+          🔁 Solo si el estudiante objeta la financiación, ofrece{" "}
           <span className="font-semibold text-gray-700">3 cuotas fijas de {money(q.cuota3)}</span>.
         </p>
         {q.alternatives.length > 0 && (
@@ -342,7 +345,7 @@ function QuoteMessage({ q }: { q: Quote }) {
             </span>
             :{" "}
             {q.alternatives
-              .map((a) => `${a.name} (6× ${money(a.cuota6)}${a.coverageLabel ? ` · cubre ${a.coverageLabel}` : ""})`)
+              .map((a) => `${a.name} (6× ${money(a.cuota6)})`)
               .join(" · ")}
             .
           </p>
@@ -350,7 +353,7 @@ function QuoteMessage({ q }: { q: Quote }) {
         {q.nextPeriodNotice && (
           <p className="text-amber-700">
             ℹ️ Siglo 21 no devolvió el período activo {q.activePeriodKey}: se cotiza el próximo período disponible (
-            {q.periodKey}) y el agente no ofrece el inicio de {q.activePeriodKey}.
+            {q.periodKey}) y el agente no ofrece el período {q.activePeriodKey}.
           </p>
         )}
       </div>
@@ -551,7 +554,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
                 }
                 tone="primary"
                 rows={[
-                  ...(q.coverageLabel ? [["Meses de cursado", q.coverageLabel] as [string, string]] : []),
+                  ["Inicio de clases", q.classStartLine || "No confirmado (no se informa)"],
                   ["Total del período (no de la carrera)", money(q.total)],
                   ["6 cuotas", money(q.cuota6)],
                   ["3 cuotas", money(q.cuota3)],
@@ -564,7 +567,7 @@ function AgentContextDialog({ result, onClose }: { result: DiagnosisResult; onCl
                   subtitle="Oculta: solo si el estudiante rechaza el principal o pregunta por otro inicio / el próximo año."
                   tone="alt"
                   rows={[
-                    ...(a.coverageLabel ? [["Meses de cursado", a.coverageLabel] as [string, string]] : []),
+                    ["Inicio de clases", a.classStartLine || "No confirmado (no se informa)"],
                     ["Total del período", money(a.total)],
                     ["6 cuotas", money(a.cuota6)],
                     ["3 cuotas", money(a.cuota3)],
