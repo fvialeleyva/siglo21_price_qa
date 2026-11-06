@@ -24,7 +24,8 @@ Ramas de precio (igual que el lambda):
 
 Calendario comercial (cuadro "NI" de Siglo 21): 1A/27 28/07/2026–14/03/2027 (ext. 28/03/2027),
 1B/27 15/03–16/05/2027 (ext. 30/05), 2A/27 17/05–01/08/2027 (ext. 15/08), 2B/27
-02/08–03/10/2027 (ext. 17/10). Las fechas de venta y extensión son de uso interno: el agente
+02/08–03/10/2027 (ext. 17/10). Las filas de 2026 se conservan como histórico (ventanas ya
+cerradas). Las fechas de venta y extensión son de uso interno: el agente
 nunca las informa. Solo 1A/27 tiene inicio de clases confirmado ("Las clases inician en marzo
 2027."). El bloque de precio informa además el beneficio por inscripción anticipada y, para
 las carreras de la lista, las materias por semestre (tecnicaturas 4; licenciaturas entre 5 y 6).
@@ -34,7 +35,7 @@ Selección del período principal (rama bimestral):
 
 1. Si Siglo 21 devuelve el **período activo** de la tabla, se cotiza ese.
 2. Si no, se cotiza el **primer período posterior al activo** (en el orden de la tabla:
-   1A/27 → 1B/27 → 2A/27 → 2B/27) que sí vino, con su propio precio, y el bloque de precio
+   1A/26 → … → 2B/26 → 1A/27 → 1B/27 → 2A/27 → 2B/27) que sí vino, con su propio precio, y el bloque de precio
    agrega en negrita una aclaración: *"Para esta carrera y modalidad, la inscripción
    disponible es para el próximo período."* (o *"…para el próximo año."* si es de otro
    ciclo; con *": las clases inician en {inicio}."* si el período tiene inicio confirmado).
