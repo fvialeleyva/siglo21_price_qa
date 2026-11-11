@@ -133,10 +133,15 @@ export const ED_EHD_PERIODS: Record<string, BimesterPeriodInfo> = {
   "1B/26": { fechaInicio: "16/03/2026", fechaFin: "17/05/2026", fechaExtension: "31/05/2026", inicioClases: "18/05/2026", nombre: "mayo 2026" },
   "2A/26": { fechaInicio: "18/05/2026", fechaFin: "02/08/2026", fechaExtension: "16/08/2026", inicioClases: "03/08/2026", nombre: "agosto 2026" },
   "2B/26": { fechaInicio: "03/08/2026", fechaFin: "04/10/2026", fechaExtension: "18/10/2026", inicioClases: "05/10/2026", nombre: "octubre 2026" },
-  "1A/27": { fechaInicio: "28/07/2026", fechaFin: "14/03/2027", fechaExtension: "", inicioClases: "15/03/2027", nombre: "marzo 2027" },
+  // Calendario comercial 2027 (cuadro "NI" de Siglo 21, ticket HF-0123). Solo el
+  // 1.A tiene inicio de clases confirmado; 1.B, 2.A y 2.B quedan sin inicio ni nombre.
+  "1A/27": { fechaInicio: "28/07/2026", fechaFin: "14/03/2027", fechaExtension: "28/03/2027", inicioClases: "marzo 2027", nombre: "marzo 2027" },
+  "1B/27": { fechaInicio: "15/03/2027", fechaFin: "16/05/2027", fechaExtension: "30/05/2027", inicioClases: "", nombre: "" },
+  "2A/27": { fechaInicio: "17/05/2027", fechaFin: "01/08/2027", fechaExtension: "15/08/2027", inicioClases: "", nombre: "" },
+  "2B/27": { fechaInicio: "02/08/2027", fechaFin: "03/10/2027", fechaExtension: "17/10/2027", inicioClases: "", nombre: "" },
 };
 
-export const ED_EHD_PERIOD_ORDER = ["1A/26", "1B/26", "2A/26", "2B/26", "1A/27"];
+export const ED_EHD_PERIOD_ORDER = ["1A/26", "1B/26", "2A/26", "2B/26", "1A/27", "1B/27", "2A/27", "2B/27"];
 
 function parseDdMmYyyy(value: string): number | null {
   const m = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
@@ -165,6 +170,21 @@ export function getActiveEdEhdPeriodKey(now: Date): string {
     return key;
   }
   return "";
+}
+
+/**
+ * isEdEhdPeriodOnSale (lambda PR #25): la ventana de venta del período (incluida
+ * la extensión) contiene el día UTC de `now`. Un período fuera de la tabla se
+ * considera fuera de venta. Filtra los alternativos antes de consultar su precio.
+ */
+export function isEdEhdPeriodOnSale(periodKey: string, now: Date): boolean {
+  const info = ED_EHD_PERIODS[periodKey];
+  if (!info) return false;
+  const inicio = parseDdMmYyyy(info.fechaInicio);
+  const cierre = parseDdMmYyyy(info.fechaExtension || info.fechaFin);
+  if (inicio === null || cierre === null) return false;
+  const today = truncateUtcDay(now);
+  return today >= inicio && today <= cierre;
 }
 
 /** buildEdEhdPeriodKey: "1/27" + "A" → "1A/27". */
