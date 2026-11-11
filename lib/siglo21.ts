@@ -21,6 +21,7 @@ import {
   buildPeriodCoverageLabel,
   formatPriceResponseV4,
   getActiveEdEhdPeriodKey,
+  isEdEhdPeriodOnSale,
   resolveV4PrimaryPeriod,
   round2,
   shownEdEhdAlternatives,
@@ -969,6 +970,10 @@ export async function diagnose(
       }
       if (!row.key) {
         row.useLabel = "Omitido: no se puede armar la clave (name/subperiod)";
+        continue;
+      }
+      if (!isEdEhdPeriodOnSale(row.key, now)) {
+        row.useLabel = `Omitido: ${row.key} con venta cerrada o fuera de la tabla del lambda`;
         continue;
       }
       if (priceData[ALT_PERIOD_PREFIX + row.key]) {

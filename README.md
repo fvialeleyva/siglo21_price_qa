@@ -25,7 +25,7 @@ Selección del período principal (rama bimestral):
 
 1. Si Siglo 21 devuelve el **período activo** de la tabla, se cotiza ese.
 2. Si no, se cotiza el **primer período posterior al activo** (en el orden de la tabla:
-   1A/26 → 1B/26 → 2A/26 → 2B/26 → 1A/27) que sí vino. Ej: activo 2B/26 y la API trae solo
+   1A/26 → 1B/26 → 2A/26 → 2B/26 → 1A/27 → 1B/27 → 2A/27 → 2B/27) que sí vino. Ej: activo 2B/26 y la API trae solo
    `1/27 A` → se cotiza 1A/27 (marzo 2027). Nombre, fechas, meses de cursado y frase de
    período de cursado salen del período cotizado, y el bloque de precio agrega en negrita una
    aclaración: si es de otro ciclo, *"Para esta carrera y modalidad, la inscripción disponible
@@ -37,7 +37,8 @@ Selección del período principal (rama bimestral):
    la tabla), **no se cotiza**: responde 500 con la instrucción de error (el bot deriva).
 
 En v4 los alternativos ocultos se ofrecen si el estudiante rechaza el principal **o si
-pregunta explícitamente por otro inicio o por el próximo año**. La tabla termina el 14/03/2027.
+pregunta explícitamente por otro inicio o por el próximo año**; solo se cotizan los alternativos que están en su
+ventana de venta. La tabla incluye el calendario comercial 2027 (HF-0123) y termina el 17/10/2027.
 
 El `cau_id` se usa tal cual llega (sin overrides) y `schedule_id` no se usa.
 
